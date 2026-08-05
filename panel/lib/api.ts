@@ -68,3 +68,9 @@ export function subscribeEvents(onEvent: (e: unknown) => void): () => void {
   };
   return () => source.close();
 }
+
+/** URL do arquivo de uma mídia. O conteúdo nunca muda (o nome vem do hash),
+ *  então o navegador pode cachear para sempre. */
+export function urlDaMidia(assetId: string): string {
+  return `${BASE}/v1/media/${assetId}/arquivo`;
+}

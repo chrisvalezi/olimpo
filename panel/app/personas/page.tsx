@@ -6,6 +6,7 @@ import useSWR from "swr";
 import { Plus, User, Link2, Brain, Search } from "lucide-react";
 import { api, mutate } from "@/lib/api";
 import { PLATAFORMA, STATUS } from "@/lib/contas";
+import { urlDaMidia } from "@/lib/api";
 
 /**
  * Personas.
@@ -68,16 +69,30 @@ function CardPersona({ persona }: { persona: any }) {
   return (
     <div className="card space-y-3">
       <div className="flex items-start justify-between">
-        <div className="min-w-0">
+        <div className="flex min-w-0 gap-2.5">
+          {persona.face_asset_id ? (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={urlDaMidia(persona.face_asset_id)} alt=""
+              className="h-12 w-12 shrink-0 rounded object-cover" />
+          ) : (
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded border border-surface-border bg-surface">
+              <User size={16} className="text-slate-700" />
+            </div>
+          )}
+          <div className="min-w-0">
           <div className="flex items-center gap-1.5">
-            <User size={14} className="shrink-0 text-slate-500" />
             <span className="truncate font-medium text-slate-100">{persona.name}</span>
             <span className="font-mono text-xs text-slate-600">{persona.slug}</span>
           </div>
           <div className="mt-0.5 text-xs text-slate-500">
-            {nicho && <span>{nicho} · </span>}
+            {persona.gender && <span>{persona.gender} · </span>}
+            {persona.apparent_age && <span>{persona.apparent_age} anos · </span>}
+            {(persona.niches ?? []).join(", ") || nicho}
+          </div>
+          <div className="text-xs text-slate-600">
             {persona.memories} memórias
-            {persona.arc && <span> · arco: {persona.arc}</span>}
+            {persona.arc && <span> · {persona.arc}</span>}
+          </div>
           </div>
         </div>
         <Link href={`/personas/${persona.id}`} className="btn-ghost shrink-0">

@@ -30,6 +30,9 @@ x-python-common: &python-common
     - ./pyproject.toml:/app/pyproject.toml:ro
     - media:/app/media
     - ./dryrun:/app/dryrun
+    # Mídia preservada da máquina de influencers, só de leitura. Sai daqui
+    # assim que a importação terminar.
+    - ./import:/app/import:ro
   # Os serviços externos (orchestrator, máquina de influencers, android-manager)
   # rodam no host, não nesta rede. Sem isto o host.docker.internal nem resolve.
   extra_hosts:

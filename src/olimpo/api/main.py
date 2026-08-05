@@ -12,7 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
 from olimpo.core.config import settings
-from olimpo.api.routers import accounts, nodes, servers
+from olimpo.api.routers import accounts, media, nodes, servers
 from olimpo.core.db import healthcheck
 
 log = structlog.get_logger(__name__)
@@ -75,6 +75,7 @@ async def metrics() -> Response:
 
 
 app.include_router(servers.router)
+app.include_router(media.router)
 app.include_router(nodes.router)
 app.include_router(accounts.router)
 
