@@ -95,7 +95,7 @@ docker compose logs --since 1h --no-log-prefix api | jq 'select(.level=="error")
 docker compose ps
 docker compose restart api worker beat                          # ou: make restart
 curl -fsS localhost:8000/health | jq .
-curl -fsS "${ORCHESTRATOR_URL}/health"
+curl -fsS "${ORCHESTRATOR_URL}/v1/health"
 ```
 
 ---

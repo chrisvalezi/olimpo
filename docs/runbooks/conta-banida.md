@@ -50,7 +50,7 @@ curl -fsS -H "Authorization: Bearer ${ANDROID_MANAGER_TOKEN}" \
 
 # O orchestrator está saudável de modo geral?
 curl -fsS -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/health" | jq .
+  "${ORCHESTRATOR_URL}/v1/health" | jq .
 ```
 
 ```sql
@@ -250,7 +250,7 @@ Tasks já em `dispatched`/`running` **não** são canceladas aqui — elas estã
 
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/tasks/<external_task_id>/cancel"
+  "${ORCHESTRATOR_URL}/v1/tasks/<external_task_id>/cancel"
 ```
 
 ### 3.2 Decidir se a frota inteira para

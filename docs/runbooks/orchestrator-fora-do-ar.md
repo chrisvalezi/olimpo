@@ -10,7 +10,7 @@
 
 ## 1. Sintoma
 
-- `curl "${ORCHESTRATOR_URL}/health"` falha, dá timeout ou devolve 5xx.
+- `curl "${ORCHESTRATOR_URL}/v1/health"` falha, dá timeout ou devolve 5xx.
 - `olimpo_circuit_breaker_state{service="orchestrator"} == 2` (aberto).
 - Tasks acumulando em `dispatched` sem nunca chegar a `verified`.
 - Nenhum webhook chegando em `/webhooks/orchestrator`.
@@ -45,16 +45,16 @@ O que **deve** acontecer sozinho, sem intervenção. Se algo aqui não estiver a
 
 ```bash
 # Alcançável?
-curl -fsS -m 5 "${ORCHESTRATOR_URL}/health" | jq . || echo "INACESSÍVEL"
+curl -fsS -m 5 "${ORCHESTRATOR_URL}/v1/health" | jq . || echo "INACESSÍVEL"
 
 # Autenticação ainda válida? (401 é problema diferente de queda)
 curl -s -o /dev/null -w '%{http_code}\n' -m 5 \
   -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/tasks?limit=1"
+  "${ORCHESTRATOR_URL}/v1/tasks?limit=1"
 
 # É rede ou é o serviço?
 docker compose exec api sh -c 'getent hosts host.docker.internal || echo "DNS falhou"'
-docker compose exec api sh -c "curl -sS -m 5 -o /dev/null -w '%{http_code} %{time_total}s\n' ${ORCHESTRATOR_URL}/health"
+docker compose exec api sh -c "curl -sS -m 5 -o /dev/null -w '%{http_code} %{time_total}s\n' ${ORCHESTRATOR_URL}/v1/health"
 ```
 
 | Resultado | Diagnóstico |
@@ -121,7 +121,7 @@ Pergunta decisiva para a reconciliação. Depende de o orchestrator ter estado d
 ```bash
 # Após a volta: ele ainda conhece as tasks que despachamos?
 curl -fsS -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/tasks/<external_task_id>" | jq '{status, updated_at, result}'
+  "${ORCHESTRATOR_URL}/v1/tasks/<external_task_id>" | jq '{status, updated_at, result}'
 ```
 
 | Resposta | Significado |
@@ -313,7 +313,7 @@ $PSQL -tA -c "SELECT id || ' ' || external_task_id FROM tasks
                 AND external_task_id IS NOT NULL;" \
 | while read -r tid ext; do
     resp=$(curl -fsS -m 10 -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-             "${ORCHESTRATOR_URL}/tasks/${ext}" 2>/dev/null)
+             "${ORCHESTRATOR_URL}/v1/tasks/${ext}" 2>/dev/null)
     if [ -z "$resp" ]; then
       echo "${tid} ${ext} DESCONHECIDA"
     else

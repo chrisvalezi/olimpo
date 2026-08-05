@@ -12,6 +12,10 @@
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "vector";
 CREATE EXTENSION IF NOT EXISTS "pg_trgm";
+-- hmac(): pseudonimiza handles de terceiros na varredura de retenção, e
+-- gera body_sha256 para provar qual texto foi avaliado sem reter o texto.
+-- Ver docs/12-seguranca.md §4.3.
+CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 -- =============================================================================
 -- TIPOS

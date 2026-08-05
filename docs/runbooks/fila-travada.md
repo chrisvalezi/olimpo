@@ -188,11 +188,11 @@ Três causas possíveis, distinguíveis:
 ```bash
 # (a) O orchestrator está fora do ar?
 curl -fsS -m 5 -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/health" | jq . || echo "ORCHESTRATOR INACESSÍVEL"
+  "${ORCHESTRATOR_URL}/v1/health" | jq . || echo "ORCHESTRATOR INACESSÍVEL"
 
 # (b) Ele conhece a task e já a concluiu? (webhook perdido)
 curl -fsS -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/tasks/<external_task_id>" | jq .
+  "${ORCHESTRATOR_URL}/v1/tasks/<external_task_id>" | jq .
 
 # (c) O webhook chegou e foi rejeitado?
 docker compose logs --since 2h --no-log-prefix api \
@@ -334,7 +334,7 @@ $PSQL -c "SELECT id || ' ' || external_task_id
             AND external_task_id IS NOT NULL;" \
 | while read -r task_id ext_id; do
     resp=$(curl -fsS -m 10 -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-             "${ORCHESTRATOR_URL}/tasks/${ext_id}" 2>/dev/null)
+             "${ORCHESTRATOR_URL}/v1/tasks/${ext_id}" 2>/dev/null)
     st=$(echo "$resp" | jq -r '.status // "unreachable"')
     echo "${task_id} ${ext_id} -> ${st}"
   done | tee /tmp/reconciliacao.txt

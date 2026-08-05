@@ -67,17 +67,24 @@ class OrchestratorClient(BaseClient):
             "callback_url": settings.orchestrator_webhook_url or None,
         }
         return await self.request(
-            "POST", "/api/v1/tasks", body,
+            "POST", "/v1/tasks", body,
             idempotency_key=idempotency_key, trace_id=trace_id,
         )
 
     async def get_status(self, external_task_id: str) -> dict[str, Any]:
         """Polling de fallback — usado pelo reconciliador quando o webhook
         não chegou. Nunca é o caminho primário."""
-        return await self.request("GET", f"/api/v1/tasks/{external_task_id}")
+        return await self.request("GET", f"/v1/tasks/{external_task_id}")
 
     async def cancel(self, external_task_id: str) -> dict[str, Any]:
-        return await self.request("POST", f"/api/v1/tasks/{external_task_id}/cancel")
+        """⚠️ A CONFIRMAR: não se sabe ainda se o orchestrator expõe
+        cancelamento de task já aceita (pergunta 16 do contrato).
+
+        Se não expuser, o kill switch não consegue abortar o que já foi
+        delegado — o que reforça manter o agendamento do nosso lado e
+        despachar o mais tarde possível. Ver ADR-0004.
+        """
+        return await self.request("POST", f"/v1/tasks/{external_task_id}/cancel")
 
     # --------------------------------------------------------------- recon --
     async def extract_content(
@@ -95,7 +102,7 @@ class OrchestratorClient(BaseClient):
         """
         return await self.request(
             "POST",
-            "/api/v1/tasks",
+            "/v1/tasks",
             {
                 "account": collector_handle,
                 "action": "extract_content",
@@ -112,7 +119,7 @@ class OrchestratorClient(BaseClient):
     async def find_account(self, handle: str) -> dict[str, Any]:
         """Localiza em qual device a conta está logada. Consultado antes do
         dispatch para falhar cedo quando a conta não está disponível."""
-        return await self.request("GET", f"/api/v1/accounts/{handle}")
+        return await self.request("GET", f"/v1/accounts/{handle}")
 
 
 #: Mapeia o task_type do Olimpo para o nome da ação no orchestrator.

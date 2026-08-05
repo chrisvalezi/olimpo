@@ -130,7 +130,7 @@ $PSQL -c "SELECT external_task_id FROM tasks
 | while read -r ext; do
     echo "cancelando ${ext}"
     curl -fsS -X POST -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-      "${ORCHESTRATOR_URL}/tasks/${ext}/cancel" || echo "  ✗ falhou: ${ext}"
+      "${ORCHESTRATOR_URL}/v1/tasks/${ext}/cancel" || echo "  ✗ falhou: ${ext}"
   done
 ```
 
@@ -290,7 +290,7 @@ ORDER BY created_at DESC;
 **Estado do sistema**
 - [ ] `curl -fsS localhost:8000/health` → `postgres`, `redis`, `litellm` todos `ok`
 - [ ] `docker compose exec worker celery -A olimpo.workers.app inspect ping` responde
-- [ ] `curl -fsS "${ORCHESTRATOR_URL}/health"` responde
+- [ ] `curl -fsS "${ORCHESTRATOR_URL}/v1/health"` responde
 - [ ] Circuit breakers fechados (`olimpo_circuit_breaker_state == 0`)
 - [ ] Nenhuma task presa em `dispatched` há mais de 30 min (§6.2)
 

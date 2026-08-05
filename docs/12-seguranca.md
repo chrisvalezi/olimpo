@@ -259,6 +259,11 @@ Permitido, porque há uso operacional direto:
 Job `pii_retention_sweep`, fila `maintenance`, diário. Ele **anonimiza**, não deleta a linha — a métrica histórica e a auditoria sobrevivem sem o dado pessoal:
 
 ```sql
+-- hmac() vem do pgcrypto, criado em 0001_initial.sql junto das demais
+-- extensões. O salt fica em `olimpo.pii_salt` (parâmetro de sessão), nunca
+-- no código — sem ele o hash de um handle é reversível por força bruta,
+-- já que o espaço de handles é pequeno e público.
+
 -- Anonimização de comentários com mais de 90 dias
 UPDATE interactions
 SET body          = '[expurgado por retencao]',
@@ -278,7 +283,7 @@ WHERE kind = 'dm'
   AND body <> '[expurgado por retencao]';
 ```
 
-O `olimpo.pii_salt` é um segredo de aplicação, não uma coluna. Rotacioná-lo torna os hashes antigos não correlacionáveis — o que é uma característica, não um bug.
+O `olimpo.pii_salt` é um segredo de aplicação (parâmetro customizado de sessão, definido pelo job via `SET LOCAL`), não uma coluna. Rotacioná-lo torna os hashes antigos não correlacionáveis — o que é uma característica, não um bug.
 
 ### 4.4 `events` e dado pessoal — a tensão central
 

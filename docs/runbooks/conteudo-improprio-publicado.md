@@ -69,7 +69,7 @@ Remoção pelo caminho de execução (o Olimpo nunca fala com a plataforma diret
 ```bash
 curl -fsS -X POST -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
   -H 'Content-Type: application/json' \
-  "${ORCHESTRATOR_URL}/tasks" \
+  "${ORCHESTRATOR_URL}/v1/tasks" \
   -d '{"account_handle":"<handle>","action":"delete_post",
        "target":{"external_id":"<external_id>"},"priority":0}' | jq .
 ```
@@ -163,7 +163,7 @@ docker compose exec -T postgres psql -U olimpo -d olimpo -tA -c \
      AND external_task_id IS NOT NULL;" \
 | while read -r ext; do
     curl -fsS -X POST -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-      "${ORCHESTRATOR_URL}/tasks/${ext}/cancel" && echo "cancelado ${ext}"
+      "${ORCHESTRATOR_URL}/v1/tasks/${ext}/cancel" && echo "cancelado ${ext}"
   done
 ```
 

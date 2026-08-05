@@ -378,13 +378,13 @@ $PSQL -c "SELECT id || ' ' || external_task_id FROM tasks
           WHERE status IN ('dispatched','running') AND external_task_id IS NOT NULL;" \
 | while read -r tid ext; do
     st=$(curl -fsS -m 10 -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-          "${ORCHESTRATOR_URL}/tasks/${ext}" 2>/dev/null | jq -r '.status // "desconhecida"')
+          "${ORCHESTRATOR_URL}/v1/tasks/${ext}" 2>/dev/null | jq -r '.status // "desconhecida"')
     echo "$tid $ext $st"
   done | tee /tmp/reconc-inflight.txt
 
 # (b) O que o orchestrator executou DEPOIS do backup e o banco não sabe
 curl -fsS -H "Authorization: Bearer ${ORCHESTRATOR_TOKEN}" \
-  "${ORCHESTRATOR_URL}/tasks?since=2026-03-12T04:00:00Z&status=completed" \
+  "${ORCHESTRATOR_URL}/v1/tasks?since=2026-03-12T04:00:00Z&status=completed" \
   | jq -r '.tasks[] | [.id, .account_handle, .action, .completed_at] | @tsv' \
   | tee /tmp/executadas-na-lacuna.tsv
 
