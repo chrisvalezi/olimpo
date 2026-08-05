@@ -294,6 +294,27 @@ Padrão: **`kling3-pro`**.
 
 ## 7. Armazenamento de mídia
 
+### 7.1 Normalização na entrada
+
+`olimpo/media/conversao.py`. Todo arquivo passa por aqui antes de ser gravado, e **quem decide o tipo são os bytes** — não o `content-type` do cliente. Nas duas direções:
+
+| Situação | Antes | Agora |
+|---|---|---|
+| `curl` envia `.webp` | `application/octet-stream` → recusado pelo envelope, não pelo conteúdo | reconhecido e aceito |
+| PDF renomeado para `.jpg` | cliente anuncia `image/jpeg`, tipo está na lista, **entrava** | recusado na porta |
+| HEIC pelo Chrome no Windows | mime vazio ou genérico → recusado | reconhecido pela marca `ftyp` |
+
+**HEIC vira JPEG na entrada.** Foto de iPhone chega nesse formato e nenhum provider o aceita: a OpenAI só recebe `png`/`jpeg`/`webp` no endpoint de edição, e o fal precisa baixar a referência num formato que decodifique. Guardar HEIC cru faria a falha aparecer na **geração** — longe do upload, sem relação óbvia com o arquivo enviado meses antes.
+
+A conversão aplica a orientação EXIF antes de gravar. Sem isso a foto de iPhone entra deitada, e a personagem sai deitada junto.
+
+> A origem convertia no navegador, com dois wasm em cadeia de fallback. Aqui é no servidor porque `POST /v1/media/upload` é o funil único de todos os caminhos — âncora, peça de figurino, produto de marca — e porque o mesmo upload precisa funcionar por `curl` e pelo celular.
+
+**A detecção lê estrutura, não varre bytes.** HEIC e MP4 usam o mesmo container ISO-BMFF, e vídeo entra pelo mesmo endpoint. As marcas compatíveis são lidas alinhadas de 4 em 4 dentro do tamanho declarado da caixa `ftyp` — uma varredura crua casaria com quatro bytes que caíssem por acaso dentro de dados de vídeo, e um `.mp4` acabaria mandado para o decodificador de imagem.
+
+**Codec:** o container traz HEVC (`libde265`). AVIF (AV1) **não** decodifica, e o erro diz isso em vez de "arquivo inválido".
+
+
 **Os arquivos ficam no armazenamento do Olimpo, nunca no CDN do provider.** As URLs do fal expiram; o CDN de onde as imagens vieram vai ser desligado. `media_assets.source_url` guarda a origem **para rastrear, nunca para servir**.
 
 | Aspecto | Como é |

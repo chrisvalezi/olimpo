@@ -1,7 +1,8 @@
 """Leitura de dimensões a partir do cabeçalho.
 
-Escrito à mão em vez de usar Pillow: são dois inteiros nos primeiros bytes,
-e a dependência traria libjpeg, zlib e libwebp para dentro da imagem.
+Lê o cabeçalho em vez de decodificar a imagem. O Pillow existe no container
+(veio com o HEIC), mas abrir uma imagem de 4K inteira para ler dois inteiros
+custa caro num caminho que roda em toda gravação.
 
 O risco de escrever à mão é reconhecer o formato e devolver número errado —
 pior que devolver None, porque ninguém verifica. Daí os casos abaixo terem

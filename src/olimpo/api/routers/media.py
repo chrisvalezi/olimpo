@@ -21,7 +21,7 @@ from olimpo.core.db import session_scope
 from olimpo.media import modelos
 from olimpo.media.servico import PedidoDeFoto
 from olimpo.prompts import photo_studio
-from olimpo.media import armazenamento, identidade as identidade_svc
+from olimpo.media import armazenamento, conversao, identidade as identidade_svc
 from olimpo.workers.tasks_geracao import enfileirar_foto, enfileirar_identidade
 
 router = APIRouter(prefix="/v1/media", tags=["mídia"])
@@ -291,6 +291,10 @@ async def listar_jobs(
 
 #: Tipos aceitos. Vídeo entra pelo mesmo caminho porque o armazenamento é o
 #: mesmo — o que muda é o papel.
+#:
+#: HEIC/HEIF não está aqui porque não é ARMAZENADO: é convertido para JPEG
+#: na entrada e o que chega ao armazenamento já é JPEG. Ver
+#: `media/conversao.py`.
 MIMES_ACEITOS = {
     "image/jpeg", "image/png", "image/webp", "image/gif",
     "video/mp4", "video/quicktime", "video/webm",
@@ -316,9 +320,41 @@ async def enviar(
     if len(conteudo) > TAMANHO_MAXIMO:
         raise HTTPException(413, f"arquivo acima de {TAMANHO_MAXIMO // 1024 // 1024} MB")
 
+    # Foto de iPhone chega em HEIC. A conversão vem ANTES da checagem de
+    # tipo de propósito: o navegador manda o mime errado com frequência
+    # (`application/octet-stream`, ou vazio), então quem decide é o byte.
     mime = arquivo.content_type or ""
+    try:
+        conteudo, mime, convertido = conversao.normalizar(
+            conteudo, mime, arquivo.filename or ""
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    # Quem manda são os BYTES, não o que o cliente declara — nas duas
+    # direções:
+    #
+    #   declarou errado  `curl` manda `application/octet-stream` para toda
+    #                    extensão que não conhece, e um webp válido era
+    #                    recusado pelo envelope em vez de pelo conteúdo.
+    #   declarou de mais renomear um PDF para `.jpg` fazia o cliente anunciar
+    #                    `image/jpeg`, e como o tipo estava na lista, entrava.
+    #                    A falha só apareceria na geração, quando o provider
+    #                    não decodificasse — longe daqui e sem explicação.
+    # Não reconhecer é motivo de recusa, não motivo para voltar a confiar no
+    # que o cliente disse: um arquivo cujos bytes não são de nenhum formato
+    # conhecido não vira imagem por ser chamado de `.jpg`.
+    detectado = conversao.detectar_mime(conteudo)
+    mime = detectado or ""
     if mime not in MIMES_ACEITOS:
-        raise HTTPException(400, f"tipo não aceito: {mime or 'desconhecido'}")
+        raise HTTPException(
+            400,
+            f"o conteúdo deste arquivo é {detectado or 'de tipo não reconhecido'}"
+            + (f" (o envio dizia {arquivo.content_type})"
+               if arquivo.content_type and detectado
+               and arquivo.content_type != detectado else "")
+            + f". Aceitos: {', '.join(sorted(MIMES_ACEITOS))}",
+        )
 
     asset_id = await armazenamento.guardar(
         conteudo, persona_id=persona_id, role=papel,
@@ -330,7 +366,7 @@ async def enviar(
     if persona_id and papel in identidade_svc.COLUNA_POR_ANCORA:
         await identidade_svc.definir_ancora(persona_id, papel, asset_id)
 
-    return {"asset_id": str(asset_id), "papel": papel}
+    return {"asset_id": str(asset_id), "papel": papel, "convertido": convertido}
 
 
 class ReferenciaEntrada(BaseModel):

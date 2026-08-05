@@ -18,7 +18,11 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 **GPT Image 2, pelos dois caminhos** — `openai-gpt-image-2` (API própria da OpenAI, cliente novo em `media/providers/openai.py`) e `fal-gpt-image-2` (hospedado no fal). Registrado duas vezes de propósito: os parâmetros são os mesmos, a escolha é de conta e fatura. O caminho direto exigiu suporte a resposta em bytes — os modelos `gpt-image-*` respondem sempre em base64 e não aceitam `response_format`, então `GeneratedAsset` ganhou `conteudo`/`mime` e o armazenamento ganhou `guardar_gerado()`. Saída em JPEG em vez do PNG padrão: 210 KB contra 1,5 MB no mesmo close, e esse peso volta em toda geração porque as âncoras são reenviadas como referência.
 
+**HEIC/HEIF no upload** — foto de iPhone é convertida para JPEG na entrada, com a orientação EXIF aplicada. Nenhum provider aceita HEIC, então guardá-lo cru faria a falha aparecer na geração, meses depois. Feito no servidor e não no navegador como na origem: o upload é o funil único de todos os caminhos.
+
 ### Corrigido
+
+**O upload confiava no `content-type` do cliente** — nas duas direções. Um `.webp` enviado por `curl` era recusado (`application/octet-stream`), e um PDF renomeado para `.jpg` era **aceito**, porque o cliente anunciava `image/jpeg` e o tipo estava na lista. Agora quem decide são os bytes, e não reconhecer é recusa — não motivo para voltar a acreditar no cliente.
 
 **Dois endpoints do fal com prefixo indevido** — `fal-seedream` e `seedance2` respondem em caminho **sem** `fal-ai/`, ao contrário de todos os vizinhos. Portei com o prefixo e o resultado era `404 Path /seedream/v5/pro/edit not found` — que não aparece na tela: o pedido é aceito, enfileira e só falha no worker. Travado em `modelos.SEM_PREFIXO_FAL` + `tests/unit/test_modelos_fal.py`, que recusa endpoint que não esteja nem prefixado nem declarado lá.
 

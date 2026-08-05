@@ -109,7 +109,7 @@ export function Upload_({
       <input
         ref={input}
         type="file"
-        accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/webm"
+        accept="image/jpeg,image/png,image/webp,image/gif,image/heic,image/heif,.heic,.heif,video/mp4,video/quicktime,video/webm"
         className="hidden"
         multiple={multiplo}
         onChange={(e) => {
