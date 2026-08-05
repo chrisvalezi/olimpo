@@ -76,6 +76,7 @@ async def metrics() -> Response:
 
 app.include_router(servers.router)
 app.include_router(media.router)
+app.include_router(media.marcas_router)
 app.include_router(nodes.router)
 app.include_router(accounts.router)
 

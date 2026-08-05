@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, CheckSquare, Megaphone,
-  Radar, Images, MessageSquare, Activity, Settings, Server, Drama,
+  Radar, Images, MessageSquare, Activity, Settings, Server, Drama, Camera,
 } from "lucide-react";
 import { clsx } from "clsx";
 
@@ -15,10 +15,11 @@ const ITEMS = [
   { href: "/aprovacoes", label: "Aprovações", icon: CheckSquare },
   { href: "/contas", label: "Contas", icon: Users },
   { href: "/personas", label: "Personas", icon: Drama },
+  { href: "/estudio", label: "Estúdio", icon: Camera },
   { href: "/campanhas", label: "Campanhas", icon: Megaphone },
   { href: "/monitores", label: "Monitores", icon: Radar },
   { href: "/servidores", label: "Servidores", icon: Server },
-  { href: "/conteudo", label: "Conteúdo", icon: Images },
+  { href: "/midias", label: "Mídias", icon: Images },
   { href: "/interacoes", label: "Interações", icon: MessageSquare },
   { href: "/observabilidade", label: "Observabilidade", icon: Activity },
   { href: "/configuracoes", label: "Configurações", icon: Settings },

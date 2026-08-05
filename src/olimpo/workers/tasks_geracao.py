@@ -22,7 +22,7 @@ from uuid import UUID
 import structlog
 from sqlalchemy import text
 
-from olimpo.core.db import session_scope
+from olimpo.core.db import engine, session_scope
 from olimpo.media.servico import PedidoDeFoto, gerar_foto
 from olimpo.workers.app import app
 
@@ -30,8 +30,22 @@ log = structlog.get_logger(__name__)
 
 
 def _rodar(corrotina: Any) -> Any:
-    """Ponte entre o Celery (síncrono) e o serviço (assíncrono)."""
-    return asyncio.run(corrotina)
+    """Ponte entre o Celery (síncrono) e o serviço (assíncrono).
+
+    O `dispose` no fim não é zelo: o pool de conexões do SQLAlchemy fica
+    preso ao event loop que o criou, e `asyncio.run` cria um loop NOVO a
+    cada task. Sem descartar o pool, a segunda task do mesmo processo recebe
+    conexões de um loop já morto e falha com "attached to a different loop".
+
+    O sintoma é traiçoeiro porque a PRIMEIRA task sempre funciona.
+    """
+    async def com_limpeza() -> Any:
+        try:
+            return await corrotina
+        finally:
+            await engine.dispose()
+
+    return asyncio.run(com_limpeza())
 
 
 async def _marcar(job_id: UUID, **campos: Any) -> None:
@@ -173,4 +187,95 @@ async def enfileirar_foto(pedido: PedidoDeFoto) -> UUID:
         })).scalar()
 
     produzir_imagem.apply_async(args=[str(job_id)], queue="production")
+    return job_id
+
+
+# =============================================================================
+# Identidade visual
+# =============================================================================
+
+@app.task(name="olimpo.workers.tasks.produce_identity", acks_late=True, max_retries=0)
+def produzir_ancora(job_id: str) -> dict[str, Any]:
+    """Gera uma âncora derivada (folha de personagem ou close).
+
+    Sem retry: cada tentativa custa e produz uma imagem diferente. Falhou,
+    o operador decide se tenta de novo.
+    """
+    from olimpo.media import identidade
+
+    identificador = UUID(job_id)
+
+    async def executar() -> dict[str, Any]:
+        async with session_scope() as s:
+            job = (await s.execute(text("""
+                SELECT persona_id, status, request FROM generation_jobs WHERE id = :id
+            """), {"id": identificador})).mappings().first()
+        if not job or job["status"] in ("done", "cancelled"):
+            return {"ignorado": True}
+
+        pedido = job["request"] or {}
+        async with session_scope() as s:
+            await s.execute(text("""
+                UPDATE generation_jobs SET status = 'running', progress = 10,
+                       started_at = now(), attempts = attempts + 1
+                 WHERE id = :id
+            """), {"id": identificador})
+
+        try:
+            alvo = pedido.get("ancora")
+            if alvo == "face":
+                res = await identidade.propor_rostos(
+                    job["persona_id"],
+                    quantidade=int(pedido.get("quantidade", 3)),
+                    seed=pedido.get("seed"), modelo=pedido.get("modelo"),
+                )
+                assets = [r.asset_id for r in res]
+            elif alvo == "wardrobe":
+                assets = [await identidade.gerar_figurino(
+                    job["persona_id"], nome=pedido.get("nome") or "figurino",
+                    roupa=pedido.get("roupa", ""), cabelo=pedido.get("cabelo", ""),
+                    texto_livre=pedido.get("texto_livre", ""),
+                    modelo=pedido.get("modelo"),
+                )]
+            else:
+                res = await identidade.gerar_ancora(
+                    job["persona_id"], alvo, modelo=pedido.get("modelo")
+                )
+                assets = [res.asset_id]
+        except Exception as exc:
+            async with session_scope() as s:
+                await s.execute(text("""
+                    UPDATE generation_jobs SET status = 'error', error = :e,
+                           finished_at = now() WHERE id = :id
+                """), {"id": identificador, "e": str(exc)[:1000]})
+            log.error("identidade.falhou", job_id=job_id, erro=str(exc))
+            raise
+
+        async with session_scope() as s:
+            await s.execute(text("""
+                UPDATE generation_jobs SET status = 'done', progress = 100,
+                       finished_at = now(), result_asset_ids = :a, error = NULL
+                 WHERE id = :id
+            """), {"id": identificador, "a": assets})
+        return {"assets": [str(a) for a in assets]}
+
+    return _rodar(executar())
+
+
+async def enfileirar_identidade(
+    persona_id: UUID, ancora: str, **opcoes: Any
+) -> UUID:
+    """Cria o job de identidade e manda para a fila."""
+    async with session_scope() as s:
+        job_id = (await s.execute(text("""
+            INSERT INTO generation_jobs (persona_id, kind, status, request, model)
+            VALUES (:p, 'image', 'queued', CAST(:req AS jsonb), :modelo)
+            RETURNING id
+        """), {
+            "p": persona_id,
+            "req": json.dumps({"ancora": ancora, **opcoes}, default=str),
+            "modelo": opcoes.get("modelo"),
+        })).scalar()
+
+    produzir_ancora.apply_async(args=[str(job_id)], queue="production")
     return job_id

@@ -6,7 +6,7 @@ import { ArrowLeft, Save, Plus, Code2, User, Link2 } from "lucide-react";
 import useSWR from "swr";
 import { api, mutate } from "@/lib/api";
 import { PLATAFORMA, STATUS, tempoRelativo } from "@/lib/contas";
-import { IdentidadeVisual, GaleriaDaPersona } from "@/components/identidade-visual";
+import { IdentidadeVisual, Figurinos, GaleriaDaPersona } from "@/components/identidade-visual";
 
 /** Blocos do persona card com edição guiada. O card é maior que isto — o
  *  resto continua acessível pelo editor JSON. Ver docs/04-persona-card-spec.md. */
@@ -155,6 +155,8 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
       </section>
 
       <IdentidadeVisual personaId={id} />
+
+      <Figurinos personaId={id} />
 
       {/* ------------------------------------------------------- logins */}
       <section className="card space-y-2">

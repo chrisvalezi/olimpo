@@ -163,6 +163,34 @@ model_list:
       metadata: "host i9-14900k · RTX 4090 · contexto 16k"
 
   # ===========================================================================
+  # olimpo-image — texto para imagem
+  # ---------------------------------------------------------------------------
+  # É o ÚNICO caminho de imagem que passa pelo gateway. Serve para criar uma
+  # personagem do zero, quando ainda não existe rosto para usar como
+  # referência. Assim que a persona tem identidade, a geração passa a exigir
+  # `image_urls` — que o gateway não expõe — e vai pelo cliente fal direto.
+  # Ver docs/13-geracao-de-midia.md §2.
+  # ===========================================================================
+
+  - model_name: olimpo-image
+    litellm_params:
+      model: fal_ai/fal-ai/bytedance/seedream/v3/text-to-image
+      api_key: os.environ/FAL_API_KEY
+      timeout: 300
+    model_info:
+      id: fal-seedream-t2i
+      mode: image_generation
+
+  - model_name: olimpo-image
+    litellm_params:
+      model: fal_ai/fal-ai/flux-pro/v1.1
+      api_key: os.environ/FAL_API_KEY
+      timeout: 300
+    model_info:
+      id: fal-flux-pro-t2i
+      mode: image_generation
+
+  # ===========================================================================
   # olimpo-vision — recon multimodal
   # ---------------------------------------------------------------------------
   # purpose: recon_analysis (screenshots capturados pelo device Android)

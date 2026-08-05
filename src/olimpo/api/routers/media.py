@@ -12,7 +12,7 @@ import pathlib
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text
@@ -21,7 +21,8 @@ from olimpo.core.db import session_scope
 from olimpo.media import modelos
 from olimpo.media.servico import PedidoDeFoto
 from olimpo.prompts import photo_studio
-from olimpo.workers.tasks_geracao import enfileirar_foto
+from olimpo.media import armazenamento, identidade as identidade_svc
+from olimpo.workers.tasks_geracao import enfileirar_foto, enfileirar_identidade
 
 router = APIRouter(prefix="/v1/media", tags=["mídia"])
 
@@ -271,3 +272,221 @@ async def listar_jobs(
              ORDER BY g.created_at DESC LIMIT :limite
         """), params)).mappings().all()
     return {"jobs": [dict(r) for r in rows]}
+
+
+# =============================================================================
+# Upload e identidade visual
+# =============================================================================
+
+#: Tipos aceitos. Vídeo entra pelo mesmo caminho porque o armazenamento é o
+#: mesmo — o que muda é o papel.
+MIMES_ACEITOS = {
+    "image/jpeg", "image/png", "image/webp", "image/gif",
+    "video/mp4", "video/quicktime", "video/webm",
+}
+TAMANHO_MAXIMO = 200 * 1024 * 1024
+
+
+@router.post("/upload", status_code=201)
+async def enviar(
+    arquivo: UploadFile = File(...),
+    persona_id: UUID | None = Form(None),
+    papel: str = Form("reference"),
+    rotulo: str | None = Form(None),
+) -> dict[str, Any]:
+    """Recebe um arquivo e cria o asset.
+
+    É por aqui que uma persona ganha rosto quando o operador já tem a foto —
+    o caminho alternativo é gerar variações e escolher uma.
+    """
+    conteudo = await arquivo.read()
+    if not conteudo:
+        raise HTTPException(400, "arquivo vazio")
+    if len(conteudo) > TAMANHO_MAXIMO:
+        raise HTTPException(413, f"arquivo acima de {TAMANHO_MAXIMO // 1024 // 1024} MB")
+
+    mime = arquivo.content_type or ""
+    if mime not in MIMES_ACEITOS:
+        raise HTTPException(400, f"tipo não aceito: {mime or 'desconhecido'}")
+
+    asset_id = await armazenamento.guardar(
+        conteudo, persona_id=persona_id, role=papel,
+        kind="video" if mime.startswith("video/") else "image",
+        mime=mime, label=rotulo or arquivo.filename, source="upload",
+    )
+
+    # Enviar direto para uma âncora é o fluxo natural de quem já tem a foto.
+    if persona_id and papel in identidade_svc.COLUNA_POR_ANCORA:
+        await identidade_svc.definir_ancora(persona_id, papel, asset_id)
+
+    return {"asset_id": str(asset_id), "papel": papel}
+
+
+@router.post("/personas/{persona_id}/ancoras/{ancora}", status_code=202)
+async def gerar_ancora(
+    persona_id: UUID, ancora: str, modelo: str | None = None,
+    quantidade: int = Query(3, ge=1, le=4), seed: int | None = None,
+) -> dict[str, Any]:
+    """Gera uma âncora de identidade.
+
+    `face` propõe variações para o operador escolher; as demais derivam do
+    rosto, usando-o como referência — é essa cadeia que faz todas serem da
+    mesma pessoa.
+    """
+    if ancora not in identidade_svc.COLUNA_POR_ANCORA:
+        raise HTTPException(
+            400, f"âncora desconhecida: {ancora}. "
+                 f"Use uma de {sorted(identidade_svc.COLUNA_POR_ANCORA)}"
+        )
+
+    async with session_scope() as s:
+        p = (await s.execute(text("""
+            SELECT name, face_asset_id, physical_desc FROM personas WHERE id = :id
+        """), {"id": persona_id})).mappings().first()
+    if not p:
+        raise HTTPException(404, "persona não encontrada")
+
+    if ancora == "face" and not (p["physical_desc"] or "").strip():
+        raise HTTPException(
+            400,
+            f"{p['name']} não tem descrição física. Ela É a identidade quando "
+            "não há foto — sem ela o modelo inventa uma pessoa a cada geração. "
+            "Preencha a descrição ou envie uma foto pelo upload.",
+        )
+    if ancora != "face" and not p["face_asset_id"]:
+        raise HTTPException(
+            400,
+            f"{p['name']} não tem rosto definido. A folha de personagem e os "
+            "closes derivam dele — sem o rosto, cada um sairia de uma pessoa "
+            "diferente.",
+        )
+
+    job_id = await enfileirar_identidade(
+        persona_id, ancora, modelo=modelo, quantidade=quantidade, seed=seed
+    )
+    return {"job_id": str(job_id), "status": "queued", "ancora": ancora}
+
+
+@router.post("/personas/{persona_id}/ancoras/{ancora}/definir")
+async def definir_ancora(
+    persona_id: UUID, ancora: str, asset_id: UUID
+) -> dict[str, Any]:
+    """Escolhe qual asset é a âncora. É como uma variação vira o rosto."""
+    if ancora not in identidade_svc.COLUNA_POR_ANCORA:
+        raise HTTPException(400, f"âncora desconhecida: {ancora}")
+    await identidade_svc.definir_ancora(persona_id, ancora, asset_id)
+    return {"ok": True, "ancora": ancora, "asset_id": str(asset_id)}
+
+
+@router.post("/personas/{persona_id}/figurinos", status_code=202)
+async def gerar_figurino(
+    persona_id: UUID, nome: str, roupa: str = "", cabelo: str = "",
+    texto_livre: str = "", modelo: str | None = None,
+) -> dict[str, Any]:
+    """Cria um figurino — a mesma personagem com outra roupa."""
+    job_id = await enfileirar_identidade(
+        persona_id, "wardrobe", nome=nome, roupa=roupa, cabelo=cabelo,
+        texto_livre=texto_livre, modelo=modelo,
+    )
+    return {"job_id": str(job_id), "status": "queued"}
+
+
+@router.get("/personas/{persona_id}/figurinos")
+async def listar_figurinos(persona_id: UUID) -> dict[str, Any]:
+    async with session_scope() as s:
+        rows = (await s.execute(text("""
+            SELECT w.id, w.name, w.description, w.asset_id, w.sort_order
+              FROM wardrobe_items w WHERE w.persona_id = :p
+             ORDER BY w.sort_order, w.created_at
+        """), {"p": persona_id})).mappings().all()
+    return {"figurinos": [dict(r) for r in rows]}
+
+
+@router.delete("/{asset_id}", status_code=204)
+async def apagar(asset_id: UUID) -> None:
+    """Remove o registro. O arquivo fica — outro asset pode apontar para ele
+    (dedupe por hash), e apagar às cegas quebraria o outro."""
+    async with session_scope() as s:
+        usado = (await s.execute(text("""
+            SELECT count(*) FROM personas
+             WHERE face_asset_id = :a OR character_sheet_asset_id = :a
+                OR close_up_face_asset_id = :a OR close_up_detail_asset_id = :a
+        """), {"a": asset_id})).scalar() or 0
+        if usado:
+            raise HTTPException(
+                409,
+                "este asset é âncora de identidade de uma persona. Trocar a "
+                "âncora antes de apagar evita deixá-la sem referência.",
+            )
+        await s.execute(text("DELETE FROM media_assets WHERE id = :a"), {"a": asset_id})
+
+
+# =============================================================================
+# Marcas
+# =============================================================================
+
+marcas_router = APIRouter(prefix="/v1/brands", tags=["marcas"])
+
+
+@marcas_router.get("")
+async def listar_marcas(persona_id: UUID | None = None) -> dict[str, Any]:
+    """Marcas disponíveis.
+
+    Sem `persona_id`, devolve o catálogo geral mais as exclusivas de cada
+    persona. Com ele, só as que aquela persona pode usar: as dela e as
+    globais.
+    """
+    where = ""
+    params: dict[str, Any] = {}
+    if persona_id:
+        where = "WHERE b.persona_id IS NULL OR b.persona_id = :p"
+        params["p"] = persona_id
+
+    async with session_scope() as s:
+        rows = (await s.execute(text(f"""
+            SELECT b.id, b.name, b.category, b.persona_id, b.default_mode,
+                   b.product_sheet_asset_id, b.asset_ids, b.active,
+                   p.name AS persona_name
+              FROM brands b LEFT JOIN personas p ON p.id = b.persona_id
+              {where}
+             ORDER BY b.name
+        """), params)).mappings().all()
+    return {"brands": [dict(r) for r in rows]}
+
+
+@marcas_router.post("", status_code=201)
+async def criar_marca(
+    name: str, category: str | None = None, persona_id: UUID | None = None,
+    default_mode: str = "holding",
+) -> dict[str, Any]:
+    """Cadastra uma marca. As fotos do produto entram depois, por upload.
+
+    `default_mode` decide como o produto entra na cena — segurado na mão ou
+    vestido no corpo. Não dá para inferir da imagem, e a instrução no prompt
+    muda completamente.
+    """
+    if default_mode not in ("holding", "wearing"):
+        raise HTTPException(400, "modo deve ser 'holding' ou 'wearing'")
+    async with session_scope() as s:
+        row = (await s.execute(text("""
+            INSERT INTO brands (name, category, persona_id, default_mode)
+            VALUES (:n, :c, :p, :m) RETURNING *
+        """), {"n": name, "c": category, "p": persona_id, "m": default_mode}
+        )).mappings().one()
+    return dict(row)
+
+
+@marcas_router.post("/{brand_id}/fotos")
+async def anexar_foto(brand_id: UUID, asset_id: UUID) -> dict[str, Any]:
+    """Anexa uma foto do produto à marca."""
+    async with session_scope() as s:
+        await s.execute(text("""
+            UPDATE brands
+               SET asset_ids = (SELECT array_agg(DISTINCT x)
+                                  FROM unnest(asset_ids || :a::uuid) x)
+             WHERE id = :b
+        """), {"a": asset_id, "b": brand_id})
+        await s.execute(text("""
+            UPDATE media_assets SET role = 'brand_product' WHERE id = :a
+        """), {"a": asset_id})
+    return {"ok": True}
