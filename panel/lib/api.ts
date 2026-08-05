@@ -1,7 +1,35 @@
-const BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+const CONFIGURED = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-/** Fetcher do SWR. Caminhos são relativos à API (ex.: "/v1/accounts"). */
-export async function api<T = any>(path: string): Promise<T> {
+/**
+ * Resolve a URL da API a partir de onde o painel está sendo ACESSADO.
+ *
+ * Quem chama a API é o navegador, não o servidor do Next. Uma URL fixada em
+ * `localhost` só funciona quando o painel é aberto na própria máquina — de
+ * um celular na Tailscale, `localhost` é o celular. Então, quando a
+ * configuração aponta para localhost e estamos num navegador em outro host,
+ * mantemos a porta e trocamos o host pelo que o usuário digitou.
+ */
+function resolveBase(): string {
+  if (typeof window === "undefined") return CONFIGURED;
+  try {
+    const url = new URL(CONFIGURED);
+    const isLoopback = ["localhost", "127.0.0.1", "0.0.0.0"].includes(url.hostname);
+    if (isLoopback && !["localhost", "127.0.0.1"].includes(window.location.hostname)) {
+      return `${window.location.protocol}//${window.location.hostname}:${url.port}`;
+    }
+    return CONFIGURED;
+  } catch {
+    return CONFIGURED;
+  }
+}
+
+const BASE = resolveBase();
+
+/** Fetcher do SWR. Caminhos são relativos à API (ex.: "/v1/accounts").
+ *  Retorno `any` de propósito: o SWR infere o tipo do fetcher, e um genérico
+ *  aqui faria toda chamada virar `{}` no lado de quem consome. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function api(path: string): Promise<any> {
   const res = await fetch(`${BASE}${path}`, {
     headers: { "Content-Type": "application/json" },
     cache: "no-store",
@@ -10,11 +38,12 @@ export async function api<T = any>(path: string): Promise<T> {
   return res.json();
 }
 
-export async function mutate<T = any>(
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function mutate(
   path: string,
   method: "POST" | "PATCH" | "DELETE",
   body?: unknown,
-): Promise<T> {
+): Promise<any> {
   const res = await fetch(`${BASE}${path}`, {
     method,
     headers: { "Content-Type": "application/json" },

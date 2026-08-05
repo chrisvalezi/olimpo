@@ -88,7 +88,7 @@ function Banner({
   return (
     <div className={`flex items-start gap-2.5 rounded-lg border p-3 text-sm ${tones[tone]}`}>
       <Icon size={16} className="mt-0.5 shrink-0" strokeWidth={2} />
-      <div>{children}</div>
+      <div>{children as React.ReactNode}</div>
     </div>
   );
 }

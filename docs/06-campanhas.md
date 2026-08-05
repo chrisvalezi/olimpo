@@ -62,59 +62,96 @@ draft ──▶ recon_pending ──▶ recon_done ──▶ planning ──▶ 
 
 ## 3. RECON — olhar antes de agir
 
-**O problema.** Uma campanha de engajamento aponta para conteúdo que **não é nosso**. Comentar às cegas em uma URL significa que a frota pode acabar comentando "amei demais 😍" em um post sobre um acidente, no perfil de um concorrente, em conteúdo adulto, em um golpe, ou numa armadilha deixada de propósito para farm.
+> ⚠️ **Reescrito em 2026-08-05**, depois de o contrato do android-orchestrator ser validado contra o código. O desenho anterior desta seção assumia que a coleta devolvia **screenshot**, **caption** e **top comments**, e que uma LLM **multimodal** analisava a imagem. **Duas dessas três coisas não existem.** Ver [contratos/android-orchestrator.md §14](contratos/android-orchestrator.md#14-recon--a-limitação-crítica).
 
-**A solução.** Antes de qualquer planejamento, uma conta Android abre o conteúdo e **extrai o que ele é**; uma LLM multimodal analisa. Só então o sistema decide quem participa e o que cada persona diz.
+**O problema, inalterado.** Uma campanha de engajamento aponta para conteúdo que **não é nosso**. Comentar às cegas em uma URL significa que a frota pode acabar comentando "amei demais 😍" em um post sobre um acidente, no perfil de um concorrente, em conteúdo adulto, em um golpe, ou numa armadilha deixada de propósito para farm.
+
+**A solução possível hoje.** Antes de qualquer planejamento, uma conta Android **abre o reel e lê os metadados estruturados que o app já cacheia**; uma LLM analisa **texto**. Só então o sistema decide quem participa e o que cada persona diz.
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│ 1. COLETA — task `extract_content` no android-orchestrator        │
-│    Uma conta do collector pool abre o alvo e captura:            │
-│    screenshot/vídeo · caption · autor · contadores · top comments│
+│ 1. COLETA — DOIS despachos ao android-orchestrator                │
+│    a) instagram.reel-download  { target, no_video: true }         │
+│         → shortcode · autor · caption · hashtags · mentions ·     │
+│           tagged_people · audio · counts · duração · localização  │
+│    b) instagram.profile-stats  { target: <autor> }                │
+│         → followers · following · posts · you_follow              │
+│    ❌ SEM screenshot · ❌ SEM texto de comentários · ❌ SÓ REELS   │
 └──────────────────────────┬───────────────────────────────────────┘
-                           ▼  campaign_recon.raw_capture / media_refs
+                           ▼  campaign_recon.raw_capture
 ┌──────────────────────────────────────────────────────────────────┐
-│ 2. ANÁLISE — LLM multimodal (alias `olimpo-vision`)              │
-│    Do que se trata? tom? público? é seguro? que ângulos cabem?   │
+│ 2. ANÁLISE — LLM de TEXTO (não multimodal)                        │
+│    Sobre o que é? tom? público? é seguro? que ângulos cabem?      │
+│    Entrada: caption + hashtags + autor + contadores + áudio       │
 └──────────────────────────┬───────────────────────────────────────┘
                            ▼  campaign_recon.analysis / safety_verdict
 ┌──────────────────────────────────────────────────────────────────┐
 │ 3. VEREDITO — safe → planeja · risky → exige humano · blocked →  │
 │    aborta a campanha e registra em guardrail_violations           │
+│    ⚠️ alvo que NÃO é reel → blocked automático, sem passar por 2  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.1 A coleta
+### 3.1 A coleta — o que dá e o que não dá
 
-A task `extract_content` é despachada ao android-orchestrator como qualquer outra ação. Detalhes que importam:
+✅ **A única primitiva de extração que existe é `instagram.reel-download`.** Ela abre o reel, deixa o app cachear o JSON público da mídia e lê esse cache. É read-only (não curte, não comenta), roda em qualquer conta e é idempotente.
 
-- **Quem coleta não participa.** A conta usada no recon sai do pool de participantes daquela campanha. Uma conta que visita o alvo e depois comenta nele tem um rastro comportamental diferente de uma que só comenta.
-- **Rotação do coletor.** `monitors.collector_pool` e o pool de recon rotacionam contas para não queimar sempre a mesma. Uma conta que abre 40 perfis alheios por dia é anômala.
-- **Coleta é barata e reutilizável.** O recon de um alvo vale para várias campanhas dentro de uma janela curta; consultar `campaign_recon` por `target_url` recente evita recoleta.
+Com `no_video: true` ela **não baixa o vídeo** — só os metadados, que é exatamente o que queremos: o vídeo iria para o `/sdcard` do device e **não há rota HTTP para buscá-lo de lá**.
 
-Payload esperado de retorno (ver [contratos/android-orchestrator.md](contratos/android-orchestrator.md)):
+`campaign_recon.raw_capture` passa a guardar isto:
 
 ```json
 {
-  "target_url": "https://instagram.com/p/XXXX",
-  "captured_at": "2026-08-05T14:03:11Z",
-  "author": {"handle": "@marca_energetico", "followers": 184000, "verified": true},
-  "caption": "Lançamento oficial da nova lata 🔥 #energia",
-  "counters": {"likes": 12400, "comments": 380, "shares": 90},
-  "media": [{"kind": "image", "ref": "media://recon/abc123.jpg"}],
-  "top_comments": [
-    {"author": "@user1", "text": "quando chega em BH?", "likes": 45}
-  ]
+  "target_url": "https://www.instagram.com/reel/C9aB3XyPqrs/",
+  "captured_at": "2026-08-05T14:03:11-03:00",
+  "reel": {
+    "shortcode": "C9aB3XyPqrs",
+    "taken_at": "2026-08-04T18:12:00-03:00",
+    "author": {"username": "marca_energetico", "full_name": "Marca Energético",
+               "is_verified": true},
+    "caption": "Lançamento oficial da nova lata 🔥 #energia",
+    "hashtags": ["#energia", "#lancamento"],
+    "mentions": ["atleta.parceiro"],
+    "tagged_people": [{"username": "atleta.parceiro", "x": 0.42, "y": 0.61}],
+    "collaborators": [],
+    "audio": {"title": "Som original", "artist": "marca_energetico", "id": "…"},
+    "counts": {"likes": 12400, "comments": 380, "plays": 210500, "shares": 90},
+    "video_duration": 27,
+    "location": "São Paulo, Brazil"
+  },
+  "author_stats": {
+    "target": "marca_energetico",
+    "followers": 184000, "following": 312, "posts": 940,
+    "you_follow": false, "follow_state": "Seguir"
+  }
 }
 ```
 
-### 3.2 A análise
+**O que se perde em relação ao desenho anterior** — e vale enunciar sem eufemismo:
 
-A LLM recebe a mídia e o texto capturados e devolve **saída estruturada validada por Pydantic** — nunca texto livre:
+| Perdido | Consequência real |
+|---|---|
+| **A imagem / o vídeo em si** | Não dá para avaliar **o que está na tela**. Um reel com caption inócua ("hoje foi assim 🖤") sobre um velório passa incólume pela análise de texto. **Este é o buraco mais perigoso do recon atual.** |
+| **O texto dos comentários** | `counts.comments` diz *quantos*, nunca *o quê*. Não dá para ler o clima da seção de comentários — se a plateia está elogiando, brigando ou fazendo piada de algo que a caption não revela. |
+| **Post de feed, carrossel e foto** | `reel-download` **só funciona com reels**: o código força a URL `/reel/<shortcode>/` porque `/p/` não cacheia o media info. Alvo que não é reel é **inanalisável hoje**. |
+| **Perfil privado / conta não seguida** | O app não cacheia o info → erro. Sem coleta, sem análise. |
+| **Screenshot sob demanda** | Não existe. Prints só aparecem nas caixas-pretas de **falha** do serviço (`GET /debug/…/screen.png`). Não serve para recon. |
+
+O que **permanece** intacto e continua valendo:
+
+- **Quem coleta não participa.** A conta usada no recon sai do pool de participantes daquela campanha. Uma conta que visita o alvo e depois comenta nele tem um rastro comportamental diferente de uma que só comenta.
+- **Rotação do coletor.** `monitors.collector_pool` e o pool de recon rotacionam contas para não queimar sempre a mesma. Uma conta que abre 40 perfis alheios por dia é anômala.
+- **Coleta é barata e reutilizável.** O recon de um alvo vale para várias campanhas dentro de uma janela curta; consultar `campaign_recon` por `target_url` recente evita recoleta. Agora é ainda mais barato: são duas leituras, sem download de mídia.
+
+> ⚠️ **`instagram.reel-download` e `instagram.profile-stats` nunca foram executados no device.** Constam da lista de "não testado" do `KNOWN_ISSUES.md` do serviço. Enquanto não houver smoke test verde, **o recon inteiro fica em dry-run** — e campanha de engajamento não sai do papel. Ver [contratos/android-orchestrator.md §15](contratos/android-orchestrator.md#15-aviso-quase-nada-foi-executado-no-device).
+
+### 3.2 A análise — texto, não visão
+
+A LLM recebe **apenas texto estruturado** (caption, hashtags, mentions, autor, contadores, áudio, duração, localização) e devolve **saída estruturada validada por Pydantic** — nunca texto livre:
 
 ```json
 {
-  "summary": "Post de lançamento de produto de uma marca de energético...",
+  "summary": "Reel de lançamento de produto de uma marca de energético...",
   "topic": "lançamento de produto",
   "tone": "comemorativo, publicitário",
   "audience": "jovem adulto, consumo fitness/gaming",
@@ -122,9 +159,12 @@ A LLM recebe a mídia e o texto capturados e devolve **saída estruturada valida
   "safety_verdict": "safe",
   "safety_reasons": [],
   "is_competitor": false,
+  "evidence_basis": "metadata_only",
+  "unseen": ["conteúdo visual do vídeo", "seção de comentários"],
+  "confidence": 0.62,
   "engagement_hooks": [
-    "dúvida recorrente sobre disponibilidade regional",
-    "muita gente pedindo sabor novo"
+    "hashtag de lançamento sugere expectativa de disponibilidade",
+    "áudio original da própria marca — a campanha pode reaproveitá-lo"
   ],
   "suggested_angles": [
     {"angle": "curiosidade sobre disponibilidade", "fits_niches": ["fitness", "gamer"]},
@@ -134,17 +174,49 @@ A LLM recebe a mídia e o texto capturados e devolve **saída estruturada valida
 }
 ```
 
-**`suggested_angles` é o coração do recon.** Não é o comentário pronto — é a matéria-prima que cada persona vai transformar no *seu* comentário. Ângulos diferentes distribuídos entre contas diferentes produzem uma seção de comentários que parece orgânica, e não um enxame.
+Três campos são **novos e obrigatórios**, e existem exatamente porque a análise ficou mais fraca:
+
+| Campo | Papel |
+|---|---|
+| `evidence_basis` | `metadata_only` hoje, sempre. Se um dia houver visão, o valor muda e os registros antigos continuam interpretáveis. |
+| `unseen` | O que a LLM **não teve acesso**. Vai para o card de aprovação humana — o revisor precisa saber que ninguém olhou o vídeo. |
+| `confidence` | Confiança da própria análise. **Abaixo de `CAMPAIGN_RECON_MIN_CONFIDENCE` (default 0.7) o veredito é rebaixado** para pelo menos `risky`. |
+
+**`suggested_angles` continua sendo o coração do recon** — mas mudou de matéria-prima. Antes, o melhor ângulo saía de *"o que a plateia já está dizendo"* nos top comments. Sem eles, os ângulos saem de caption, hashtags, áudio e do perfil do autor: mais genéricos, e por isso **mais propensos ao padrão de farm** que a `spread_policy` existe para destruir.
+
+Compensações, todas do nosso lado:
+
+1. **Ângulo derivado de metadado é declarado como tal** — o prompt de adaptação local recebe `evidence_basis` e é instruído a **não fingir intimidade com a conversa** ("todo mundo aqui já falou isso" vira mentira detectável quando ninguém leu os comentários).
+2. **`action_mix` pende para o lado silencioso.** Sem saber o clima da seção de comentários, **curtir e salvar são seguros; comentar não é**. O default de `comment` cai, e comentário em alvo externo passa a exigir `safety_verdict = safe` **e** `confidence ≥ 0.8`.
+3. **Menos participantes.** `max_participation` para alvo externo é reduzido enquanto o recon for cego ao visual.
 
 ### 3.3 O veredito de segurança
 
 | `safety_verdict` | Significado | Ação |
 |---|---|---|
-| `safe` | Conteúdo comum, sem sinal de risco | Segue para `planning` |
-| `risky` | Tema sensível, polêmico, ou ambíguo | Segue, mas **exige revisão humana reforçada**; participação reduzida |
+| `safe` | Conteúdo comum, sem sinal de risco, **e** `confidence ≥ 0.7` | Segue para `planning` |
+| `risky` | Tema sensível, polêmico ou ambíguo — **ou** `confidence` baixa — **ou** só metadado num nicho onde a imagem importa | Segue, mas **exige revisão humana reforçada**; participação reduzida; comentário desabilitado |
 | `blocked` | Tragédia, menor de idade, conteúdo adulto, discurso de ódio, golpe, tema de saúde/morte, judicialização | **Aborta a campanha** e grava em `guardrail_violations` |
 
-Regra de ouro: **na dúvida, `blocked`.** O custo de uma campanha abortada é um humano reagendar. O custo de 30 contas comentando algo alegre num post sobre uma morte é a operação inteira.
+### 3.3.1 ⚠️ Alvo que não é reel: `blocked` por padrão
+
+**Regra nova, e é a mudança mais importante desta seção.**
+
+Se o `target_url` não é um reel — post de feed `/p/`, carrossel, foto, perfil, story — **não existe coleta possível hoje**. Nesse caso:
+
+```
+target_url não é /reel/  ──▶  campaign_recon.safety_verdict = 'blocked'
+                              safety_reasons = ['nao_analisavel:formato_nao_suportado']
+                              campanha → aborted
+```
+
+Isto **não** é conservadorismo decorativo. A alternativa é literalmente comentar às cegas — que é exatamente o cenário que o recon existe para impedir, e que o [ADR-0008](adr/0008-recon-antes-da-campanha.md) proíbe. Um alvo que não pode ser olhado não é "um alvo com menos informação": é **um alvo não visto**.
+
+Saída para o humano, não para o sistema: um operador pode **abrir o post, olhar e liberar manualmente**, gravando `campaign_recon.analysis` com `evidence_basis: "human"`. É trabalho manual de propósito — é o preço de agir sobre algo que a máquina não consegue ver.
+
+O mesmo vale para coleta que falha (`ok: false`, perfil privado, reel indisponível): **qualquer falha de recon é `blocked`**, nunca "seguir sem".
+
+Regra de ouro, inalterada e agora mais literal: **na dúvida, `blocked`.** O custo de uma campanha abortada é um humano reagendar. O custo de 30 contas comentando algo alegre num post sobre uma morte é a operação inteira.
 
 ---
 

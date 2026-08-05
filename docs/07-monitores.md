@@ -66,7 +66,10 @@ sources (catálogo)          monitors (processo vivo)        monitor_hits (o que
                   │
                   ▼
    coleta via android-orchestrator, com conta sorteada do collector_pool
+   (a primitiva depende de sources.kind — ver §3.1)
                   │
+                  ▼   ⏱ POLLING: GET /tasks/{id} → GET /jobs/{id}
+                  │      (não existe webhook — o resultado a gente vai buscar)
                   ▼
    dedup_hash já existe em ingested_items?
         │ sim → grava monitor_hit (triggered=false) e encerra
