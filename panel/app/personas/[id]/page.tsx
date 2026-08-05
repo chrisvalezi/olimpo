@@ -154,9 +154,9 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
         </label>
       </section>
 
-      <IdentidadeVisual personaId={id} />
+      <IdentidadeVisual personaId={id} persona={persona} />
 
-      <Figurinos personaId={id} />
+      <Figurinos personaId={id} persona={persona} />
 
       {/* ------------------------------------------------------- logins */}
       <section className="card space-y-2">

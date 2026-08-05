@@ -228,14 +228,27 @@ def produzir_ancora(job_id: str) -> dict[str, Any]:
                     job["persona_id"],
                     quantidade=int(pedido.get("quantidade", 3)),
                     seed=pedido.get("seed"), modelo=pedido.get("modelo"),
+                    referencias_entrada=[
+                        identidade.ReferenciaDeEntrada(
+                            asset_id=UUID(r["asset_id"]),
+                            papel=r.get("papel", "face"),
+                            nota=r.get("nota", ""),
+                        )
+                        for r in (pedido.get("referencias") or [])
+                    ],
                 )
                 assets = [r.asset_id for r in res]
             elif alvo == "wardrobe":
                 assets = [await identidade.gerar_figurino(
-                    job["persona_id"], nome=pedido.get("nome") or "figurino",
-                    roupa=pedido.get("roupa", ""), cabelo=pedido.get("cabelo", ""),
+                    job["persona_id"], nome=pedido.get("nome", ""),
+                    top=pedido.get("top", ""), bottom=pedido.get("bottom", ""),
+                    calcado=pedido.get("calcado", ""),
+                    cabelo=pedido.get("cabelo", ""),
                     texto_livre=pedido.get("texto_livre", ""),
                     modelo=pedido.get("modelo"),
+                    referencias_extras=[
+                        UUID(x) for x in (pedido.get("referencias_extras") or [])
+                    ],
                 )]
             else:
                 res = await identidade.gerar_ancora(

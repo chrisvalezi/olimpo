@@ -9,7 +9,7 @@ como pedir "o mesmo rosto de antes".
 from __future__ import annotations
 
 import pathlib
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
@@ -322,17 +322,38 @@ async def enviar(
     return {"asset_id": str(asset_id), "papel": papel}
 
 
+class ReferenciaEntrada(BaseModel):
+    """Uma foto que guia a geração, com o papel dela declarado."""
+
+    asset_id: UUID
+    #: face — recria este rosto · style — copie a pose, roupa e luz, NUNCA o
+    #: rosto · extra — a MESMA pessoa em outro ângulo, reforça a identidade.
+    papel: Literal["face", "style", "extra"] = "face"
+    #: Sobrescreve a regra padrão. "use o cabelo desta" é mais específico
+    #: que qualquer instrução genérica.
+    nota: str = ""
+
+
+class PedidoDeAncora(BaseModel):
+    modelo: str | None = None
+    quantidade: int = Field(default=3, ge=1, le=4)
+    seed: int | None = None
+    #: Quantas quiser. A ordem é reorganizada no serviço — rosto, estilo,
+    #: extras — porque a instrução fala em "a primeira" e "a segunda".
+    referencias: list[ReferenciaEntrada] = []
+
+
 @router.post("/personas/{persona_id}/ancoras/{ancora}", status_code=202)
 async def gerar_ancora(
-    persona_id: UUID, ancora: str, modelo: str | None = None,
-    quantidade: int = Query(3, ge=1, le=4), seed: int | None = None,
+    persona_id: UUID, ancora: str, body: PedidoDeAncora | None = None
 ) -> dict[str, Any]:
     """Gera uma âncora de identidade.
 
-    `face` propõe variações para o operador escolher; as demais derivam do
-    rosto, usando-o como referência — é essa cadeia que faz todas serem da
-    mesma pessoa.
+    `face` propõe variações para o operador escolher, e aceita fotos de
+    referência — quantas ele tiver. As demais derivam do rosto, usando-o
+    como referência; é essa cadeia que faz todas serem da mesma pessoa.
     """
+    body = body or PedidoDeAncora()
     if ancora not in identidade_svc.COLUNA_POR_ANCORA:
         raise HTTPException(
             400, f"âncora desconhecida: {ancora}. "
@@ -346,12 +367,12 @@ async def gerar_ancora(
     if not p:
         raise HTTPException(404, "persona não encontrada")
 
-    if ancora == "face" and not (p["physical_desc"] or "").strip():
+    if ancora == "face" and not (p["physical_desc"] or "").strip() and not body.referencias:
         raise HTTPException(
             400,
-            f"{p['name']} não tem descrição física. Ela É a identidade quando "
-            "não há foto — sem ela o modelo inventa uma pessoa a cada geração. "
-            "Preencha a descrição ou envie uma foto pelo upload.",
+            f"{p['name']} não tem descrição física nem foto de referência. "
+            "Uma das duas é a identidade — sem nenhuma, o modelo inventa uma "
+            "pessoa diferente a cada geração.",
         )
     if ancora != "face" and not p["face_asset_id"]:
         raise HTTPException(
@@ -362,9 +383,52 @@ async def gerar_ancora(
         )
 
     job_id = await enfileirar_identidade(
-        persona_id, ancora, modelo=modelo, quantidade=quantidade, seed=seed
+        persona_id, ancora, modelo=body.modelo, quantidade=body.quantidade,
+        seed=body.seed,
+        referencias=[r.model_dump(mode="json") for r in body.referencias],
     )
     return {"job_id": str(job_id), "status": "queued", "ancora": ancora}
+
+
+@router.delete("/personas/{persona_id}/ancoras/{ancora}", status_code=200)
+async def aposentar_ancora(persona_id: UUID, ancora: str) -> dict[str, Any]:
+    """Desliga a âncora sem apagar a imagem.
+
+    Quem testa outra geração não quer perder a anterior: o asset continua na
+    biblioteca, marcado como referência, e pode ser reescolhido depois. Só o
+    vínculo é desfeito.
+
+    Tirar o rosto derruba a identidade inteira — as outras três derivam
+    dele —, então isso é dito em vez de acontecer em silêncio.
+    """
+    if ancora not in identidade_svc.COLUNA_POR_ANCORA:
+        raise HTTPException(400, f"âncora desconhecida: {ancora}")
+    coluna = identidade_svc.COLUNA_POR_ANCORA[ancora]
+
+    async with session_scope() as s:
+        antigo = (await s.execute(
+            text(f"SELECT {coluna} FROM personas WHERE id = :p"), {"p": persona_id}
+        )).scalar()
+        if not antigo:
+            return {"ok": True, "ja_estava_vazia": True}
+
+        await s.execute(
+            text(f"UPDATE personas SET {coluna} = NULL WHERE id = :p"),
+            {"p": persona_id},
+        )
+        # Volta a ser candidata: continua na biblioteca e pode ser reescolhida.
+        await s.execute(text("""
+            UPDATE media_assets SET role = 'reference' WHERE id = :a
+        """), {"a": antigo})
+
+    return {
+        "ok": True,
+        "asset_liberado": str(antigo),
+        "aviso": (
+            "as outras âncoras derivam do rosto — sem ele, gerar qualquer uma "
+            "produz outra pessoa"
+        ) if ancora == "face" else None,
+    }
 
 
 @router.post("/personas/{persona_id}/ancoras/{ancora}/definir")
@@ -378,15 +442,35 @@ async def definir_ancora(
     return {"ok": True, "ancora": ancora, "asset_id": str(asset_id)}
 
 
+class PedidoDeFigurino(BaseModel):
+    """Peça a peça, como na origem.
+
+    Separar importa: o modelo trata cada peça como um item a reproduzir, não
+    como uma descrição geral. "camiseta branca, jeans largo, tênis branco"
+    produz resultado diferente de "look casual".
+    """
+
+    nome: str = ""
+    top: str = ""
+    bottom: str = ""
+    calcado: str = ""
+    cabelo: str = ""
+    #: Sobrescreve os campos acima.
+    texto_livre: str = ""
+    modelo: str | None = None
+    #: Fotos de peças reais que a personagem deve vestir.
+    referencias_extras: list[UUID] = []
+
+
 @router.post("/personas/{persona_id}/figurinos", status_code=202)
-async def gerar_figurino(
-    persona_id: UUID, nome: str, roupa: str = "", cabelo: str = "",
-    texto_livre: str = "", modelo: str | None = None,
-) -> dict[str, Any]:
+async def gerar_figurino(persona_id: UUID, body: PedidoDeFigurino) -> dict[str, Any]:
     """Cria um figurino — a mesma personagem com outra roupa."""
+    if not any([body.top, body.bottom, body.calcado, body.cabelo, body.texto_livre]):
+        raise HTTPException(
+            400, "descreva ao menos uma peça, ou use o texto livre"
+        )
     job_id = await enfileirar_identidade(
-        persona_id, "wardrobe", nome=nome, roupa=roupa, cabelo=cabelo,
-        texto_livre=texto_livre, modelo=modelo,
+        persona_id, "wardrobe", **body.model_dump(mode="json")
     )
     return {"job_id": str(job_id), "status": "queued"}
 
