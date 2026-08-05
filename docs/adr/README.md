@@ -19,6 +19,7 @@ Um ADR aceito não é imutável: é substituído por outro ADR, nunca editado pa
 | [0011](0011-polling-e-registro-de-nos.md) | Polling e registro de nós do orchestrator | Aceito | Não existe webhook no orchestrator e cada instância só controla o próprio host: a verificação é por polling, a lista de nós é nossa e a chave de task externa é o par `(node_id, external_task_id)`. |
 | [0012](0012-servidor-com-varios-servicos.md) | Um servidor roda vários serviços | Aceito | O modelo deixa de ser "nó = orchestrator": `servers → server_services`, com credencial, TLS e saúde por serviço, e `devices` vira tabela de verdade para sustentar a transmissão de tela. |
 | [0013](0013-persona-separada-da-conta.md) | A persona é separada da conta | Aceito | `personas → accounts → account_placements`: a identidade deixa de ser o login, a memória passa a ser da personagem, conta sem persona é estado válido e ausência no inventário não apaga nada. |
+| [0014](0014-absorver-a-maquina-de-influencers.md) | Absorver a máquina de influencers | Aceito | O serviço de geração deixa de existir e o Olimpo fica com o que ele sabia: a identidade visual vira coluna e `media_assets`, os motores de prompt são portados sem alteração semântica e verificados por teste diferencial, e a fronteira gateway × cliente direto fica explícita porque o LiteLLM não cobre edição com referência nem vídeo. |
 
 ---
 

@@ -3,7 +3,9 @@
 > O JSON armazenado em **`personas.persona_card`**, versionado em `persona_versions`.
 > Formato inspirado no **character file do ElizaOS** ([ADR-0001](adr/0001-core-proprio.md) § 2), adaptado à nossa arquitetura: adotamos o *shape* — não importamos código.
 
-> ⚠️ **Mudou de casa na migração 0007.** Até a 0006 o card vivia em `accounts.persona_card`, uma linha por login. Desde a [ADR-0013](adr/0013-persona-separada-da-conta.md) ele vive em `personas.persona_card`: **uma persona, um card, vários logins.** `accounts.persona_card` continua existindo como herança até a `0008` e **não é fonte da verdade** — ler de lá devolve o card velho em silêncio. Ver [1.4](#14-onde-o-card-mora).
+> ⚠️ **Mudou de casa na migração 0007, e a herança saiu na 0008.** Até a 0006 o card vivia em `accounts.persona_card`, uma linha por login. Desde a [ADR-0013](adr/0013-persona-separada-da-conta.md) ele vive em `personas.persona_card`: **uma persona, um card, vários logins.** A coluna antiga foi **removida** na migração 0008 — código que ainda a selecione agora quebra alto, em vez de devolver o card velho em silêncio. Ver [1.4](#14-onde-o-card-mora).
+
+> ⚠️ **A persona ganhou identidade VISUAL na migração 0008** ([ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md)). Parte do que este documento descreve como bloco `visual` do card passou a ser **coluna de `personas` e linha de `media_assets`** — porque o motor de prompt lê esses campos a cada geração e eles precisam ser validáveis. A divisão está em [1.5](#15-duas-identidades-a-comportamental-e-a-visual), e o bloco `visual` foi realinhado em [2.4](#24-visual--como-ela-aparece).
 
 **Índice**
 
@@ -33,7 +35,7 @@ O Persona Card é a **alma da personagem** — não do login. Ele responde quem 
 
 | Risco | Como o card mitiga |
 |---|---|
-| **Inconsistência visual** — a mesma influencer com rostos diferentes em dois posts mata a ilusão em uma semana | `visual.face_reference` fixa seed/id na máquina de influencers; QA compara embedding de rosto contra o canônico |
+| **Inconsistência visual** — a mesma influencer com rostos diferentes em dois posts mata a ilusão em uma semana | Desde a 0008: as **quatro âncoras de identidade** em `media_assets`, reenviadas na ordem a cada geração ([1.5](#15-duas-identidades-a-comportamental-e-a-visual)). ❓ O QA por embedding de rosto ainda não existe |
 | **Deriva de voz** — 200 posts depois a persona virou "assistente prestativa" | `voice.examples` são few-shot em todo prompt de texto; QA valida marcadores de registro |
 | **Risco jurídico** — conselho de saúde, difamação, acusação | `taboos` é lista fechada, checada mecanicamente antes de qualquer publicação |
 | **Detecção de farm** — 8 contas da casa com a mesma voz e o mesmo vocabulário | Cards distintos com `slang.never` cruzados produzem textos que não se parecem |
@@ -46,6 +48,7 @@ O Persona Card é a **alma da personagem** — não do login. Ele responde quem 
 - **Não é o humor do dia.** `accounts.mood` modula o tom dentro dos limites do card — nunca contra ele.
 - **Não é configuração de rate limit.** `accounts.cadence` (coluna) é o teto operacional; `cadence` (bloco do card) é intenção editorial. Quando divergem, **o banco vence**.
 - **Não é o login.** Handle, credencial, proxy, e-mail, device e situação operacional são da conta, não da personagem. O card descreve quem ela é; a conta descreve onde ela está logada.
+- **Não é a identidade visual.** Desde a migração 0008, o que a geração de imagem lê são **colunas** de `personas` e as quatro âncoras em `media_assets`, não o jsonb. O card continua dono da *política* visual (estética, enquadramentos típicos, o que é proibido aparecer); a *geometria* da personagem mora fora dele. Ver [1.5](#15-duas-identidades-a-comportamental-e-a-visual).
 
 ---
 
@@ -53,9 +56,12 @@ O Persona Card é a **alma da personagem** — não do login. Ele responde quem 
 
 ```
 personas                    ← O CARD VIVE AQUI. Um por personagem.
-  persona_card    jsonb        voz, tabus, estética, lore, cadência
+  persona_card    jsonb        voz, tabus, lore, cadência, comercial
   persona_version integer      inteiro monotônico, incrementado a cada edição
-  persona_engine_id text       referência facial na máquina de influencers
+  ─────────────────────────── (0008) a identidade VISUAL, em colunas:
+  gender · physical_desc · personality_energy · niches · palette · …
+  face_asset_id · character_sheet_asset_id
+  close_up_face_asset_id · close_up_detail_asset_id   → media_assets
   │
   ├─ accounts  @luna.prado         (instagram)  ─┐
   ├─ accounts  Luna · 11 9xxxx     (whatsapp)   ─┤ o MESMO card vale
@@ -73,6 +79,59 @@ Três consequências práticas:
 | **Persona sem card não deve sair de `L0`** | `persona_card = '{}'` significa *card por escrever*, não *sem persona*. Sem voz declarada, a LLM escreve genérico e o QA não tem contra o que validar. O painel marca essas personas com aviso |
 
 **O card é da personagem; o ritmo é do login.** `accounts.cadence`, `accounts.active_hours`, `accounts.timezone` e `accounts.mood` continuam por conta, porque quem age é o login: a mesma personagem pode postar 1×/dia no Instagram e responder mensagens o dia inteiro no WhatsApp. O bloco `cadence` do card é a intenção editorial dela em geral; o teto real é o da conta que vai executar.
+
+---
+
+### 1.5 Duas identidades: a comportamental e a visual
+
+> Migração 0008 · [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md) · subsistema em [docs/13](13-geracao-de-midia.md)
+
+Até a 0007, a persona era **só comportamental**: um jsonb com voz, tabus, lore e estética. O que dava rosto a ela morava fora do Olimpo, na máquina de influencers, alcançável por `persona_engine_id`. A 0008 absorveu aquele serviço, e com ele veio a **identidade visual**.
+
+A persona passa a ter **duas metades**, e a linha entre elas não é temática — é sobre **quem lê o campo**:
+
+| | Identidade comportamental | Identidade visual |
+|---|---|---|
+| **Onde vive** | `personas.persona_card` (jsonb) | **colunas** de `personas` + linhas de `media_assets` |
+| **Quem lê** | prompts de **LLM** (caption, resposta, plano do dia) | **motores de prompt** determinísticos ([docs/14](14-motores-de-prompt.md)) |
+| **Como é validada** | schema do card + QA sobre o texto gerado ([6](#6-validação)) | `CHECK` no banco, FK, ordem do array |
+| **O que quebra se estiver errada** | ela fala fora da voz | ela **muda de rosto** |
+| **Versionada?** | sim, em `persona_versions` | não — asset novo é linha nova em `media_assets` |
+
+**Por que coluna e não mais um bloco do jsonb.** Um campo que o motor de prompt lê a cada geração precisa ser validável pelo banco. `personality_energy` fora de 0–100 não falha, **distorce** — a pontuação de guarda-roupa mede distância até esse número, e um `150` faria todos os looks parecerem igualmente ruins. Um `CHECK` resolve; um jsonb livre não tem como. O mesmo vale para `gender`, que dirige o pool inteiro de figurinos, e para as quatro FKs de asset, que precisam de integridade referencial de verdade.
+
+#### O que vive onde
+
+| Campo | Onde | Por quê |
+|---|---|---|
+| `gender`, `apparent_age` | **coluna** | Dirigem pool de guarda-roupa, poses e pronomes do prompt de vídeo |
+| `physical_desc` | **coluna** | Entra **literalmente** no bloco de sujeito de todo prompt de imagem |
+| `backstory` | **coluna** | É contra ela que os 100 arquétipos de profissão testam suas regex |
+| `personality_energy` (0–100) | **coluna**, com `CHECK` | Janela de energia do guarda-roupa, escolha de pose, nota de styling |
+| `niches`, `vibe_words`, `clothing_style`, `palette`, `content_pillars` | **coluna** (`text[]`) | Entram na pontuação de seleção de look |
+| `backstory_context` | **coluna** (jsonb) | Classificação por LLM, persistida. Na origem era recalculada a cada geração |
+| `home_slots` | **coluna** (jsonb) | Cenários recorrentes da personagem |
+| **As 4 âncoras** (`face_asset_id`, `character_sheet_asset_id`, `close_up_face_asset_id`, `close_up_detail_asset_id`) | **FK → `media_assets`** | A ordem entre elas é o mecanismo da consistência facial |
+| `reference_asset_ids` | **coluna** (`uuid[]`) | Fotos extras do mesmo rosto; entram **no fim** do array |
+| `voice` (tom, gírias, exemplos, `never_say`) | **card** | Lido por LLM, validado por QA de texto |
+| `taboos`, `commercial`, `editorial`, `curation` | **card** | Guardrails e política — semânticos, não geométricos |
+| `lore`, `personality`, `niche`, `cadence` | **card** | Alimentam o PLAN e a escrita, não a imagem |
+| `visual.aesthetic`, `visual.forbidden_visuals`, `visual.shot_types` | **card** | Continuam sendo **política editorial visual**, não parâmetro de geração — ver [2.4](#24-visual--como-ela-aparece) |
+
+#### As quatro âncoras, e por que a ordem é contrato
+
+**Não existe seed, LoRA, IP-Adapter nem embedding facial.** A personagem se mantém a mesma porque as quatro imagens são reenviadas ao modelo a cada geração, **nesta ordem**:
+
+| # | Papel | O que trava |
+|---|---|---|
+| 1 | `face` | O rosto canônico |
+| 2 | `character_sheet` | Turnaround de 4 painéis: **a roupa e o corpo** |
+| 3 | `close_up_face` | Textura de pele |
+| 4 | `close_up_detail` | Cartela macro: olho, sobrancelha, lábio, mão |
+
+O prompt referencia essas posições como `@image1`..`@image4`, e as tags são traduzidas para ordinais em linguagem natural (*"the second reference image"*) porque nenhum provider entende a sintaxe de tag. **Reordenar o array não gera erro** — faz o modelo copiar a roupa da referência de rosto, e o sintoma aparece semanas depois em forma de rostos que derivaram. O mecanismo inteiro, com os quatro pontos de falha, está em [docs/13 § 3](13-geracao-de-midia.md#3-consistência-facial--as-quatro-coisas-frágeis).
+
+> **A quarta lei, implícita nas outras três:** *o card descreve quem ela é; as âncoras definem quem ela é.* Uma divergência entre `visual.canonical_description` e a foto de `face_asset_id` se resolve **a favor da imagem** — o texto pode ser corrigido, o rosto já publicado não.
 
 ---
 
@@ -212,7 +271,25 @@ O bloco mais usado. Entra em **toda** geração de texto.
 
 ### 2.4 `visual` — como ela aparece
 
-Bloco **crítico** para influencer. `face_reference` é o que garante que a pessoa das fotos é sempre a mesma.
+Bloco **crítico** para influencer.
+
+> ⚠️ **Realinhado na migração 0008.** Este bloco foi escrito quando a geração morava na máquina de influencers, e o que garantia a consistência facial era supostamente um par `persona_engine_id` + `seed`. **Não é assim que funciona.** Não existe seed fixa por trás da consistência: ela vem das quatro imagens de identidade reenviadas na ordem certa a cada geração ([1.5](#15-duas-identidades-a-comportamental-e-a-visual)). O sub-bloco `face_reference` é **herança** e não é lido por nada; os campos que a geração usa de verdade são colunas de `personas`.
+>
+> | Campo do card | Situação | Onde está a verdade |
+> |---|---|---|
+> | `face_reference.persona_engine_id` | **[HERANÇA]** | não existe mais — a máquina de influencers foi absorvida |
+> | `face_reference.seed` | **[HERANÇA]** | não há seed. `GenerationRequest.seed` existe e é opcional: um mecanismo mais fraco, para quando o modelo não aceita imagem de referência |
+> | `face_reference.reference_image_ids` | **[HERANÇA]** | `personas.face_asset_id` + as outras três âncoras, **na ordem**, mais `reference_asset_ids` |
+> | `face_reference.locked` | **[HERANÇA]** | a proteção real é operacional: apagar um `media_asset` âncora zera a FK em silêncio |
+> | `canonical_description` | **migrou** | `personas.physical_desc` — entra **literalmente** no prompt |
+> | `palette` | **migrou** | `personas.palette` (`text[]`) |
+> | `recurring_settings` | **migrou** | `personas.home_slots` (jsonb) |
+> | `wardrobe.staples` / `.colors` | **migrou** | `wardrobe_items` (figurinos gerados) + `personas.clothing_style` |
+> | `aesthetic`, `body_language`, `shot_types`, `forbidden_visuals`, `wardrobe.never` | **continuam no card** | são **política editorial visual**, checada pelo QA — não parâmetro de geração |
+>
+> ❓ A remoção formal do sub-bloco `face_reference` do schema ainda não foi feita; ele está marcado como herança e ignorado pelo código. O exemplo em [3.1](#31-influencer-fitness-brasileira--manusarti) o preserva como está para não invalidar cards existentes.
+
+O texto abaixo é o do schema original, mantido para leitura dos cards já escritos.
 
 ```jsonc
 {
@@ -253,20 +330,28 @@ Bloco **crítico** para influencer. `face_reference` é o que garante que a pess
 
 | Campo | Tipo | Obrig. | Notas |
 |---|---|---|---|
-| `canonical_description` | `string` | sim | Descrição física **canônica**, uma só. Vai para todo prompt de imagem |
-| `face_reference.persona_engine_id` | `string` | **sim p/ influencer** | ID na máquina de influencers, espelhando `personas.persona_engine_id`. Sem ele não há geração consistente. Como é da persona, **os vários logins dela mostram a mesma pessoa** — que é o ponto |
-| `face_reference.seed` | `integer` | **sim p/ influencer** | Seed fixa. **Alterar = outra pessoa.** Bloqueado por validação |
-| `face_reference.reference_image_ids` | `string[]` | sim p/ influencer | Imagens canônicas; base do QA por embedding de rosto |
-| `face_reference.locked` | `boolean` | sim p/ influencer | `true` impede qualquer alteração automática |
-| `palette` | `object` | sim | Cores da estética. Entra no prompt de imagem e no QA visual |
-| `aesthetic` | `string` | sim | Uma frase sobre tratamento fotográfico |
-| `recurring_settings` | `string[]` | sim | 3–8 cenários recorrentes. **Cenário repetido é o que faz parecer uma vida, não um banco de imagens** |
-| `wardrobe` | `object` | sim | `staples` cria continuidade; `never` evita deriva estética |
+| `canonical_description` | `string` | sim | Descrição física **canônica**, uma só. **Desde a 0008 a fonte é `personas.physical_desc`** |
+| `face_reference.persona_engine_id` | `string` | **[HERANÇA]** | Era o ID na máquina de influencers. Ignorado desde a 0008 |
+| `face_reference.seed` | `integer` | **[HERANÇA]** | **Não existe seed por trás da consistência facial.** Ver o aviso acima |
+| `face_reference.reference_image_ids` | `string[]` | **[HERANÇA]** | Substituído pelas quatro FKs de âncora em `personas`, **na ordem** |
+| `face_reference.locked` | `boolean` | **[HERANÇA]** | |
+| `palette` | `object` | sim | Cores da estética. **Fonte da geração é `personas.palette`**; aqui fica o `mood` textual |
+| `aesthetic` | `string` | sim | Uma frase sobre tratamento fotográfico. **Continua no card** |
+| `recurring_settings` | `string[]` | sim | 3–8 cenários recorrentes. **Cenário repetido é o que faz parecer uma vida, não um banco de imagens.** Fonte da geração: `personas.home_slots` |
+| `wardrobe` | `object` | sim | `staples` cria continuidade; `never` evita deriva estética. Os figurinos **gerados** são `wardrobe_items` |
 | `body_language` | `string` | não | Expressão e postura padrão |
 | `shot_types` | `string[]` | não | Enquadramentos típicos |
 | `forbidden_visuals` | `string[]` | sim | Limite duro do QA visual |
 
-**Armadilha.** `face_reference.seed` é o campo mais destrutivo do card. Mudá-lo depois de 50 posts publicados quebra a consistência retroativamente: o histórico do feed mostra uma pessoa, os posts novos mostram outra. Por isso `locked: true` é o default e a validação recusa alteração de `seed`/`persona_engine_id` sem aprovação humana explícita ([6.3](#63-regras-de-imutabilidade)).
+**Armadilha — e ela mudou de lugar.** O texto original desta seção dizia que `face_reference.seed` era o campo mais destrutivo do card. **O risco é real; o campo estava errado.** Não há seed: o que quebra a consistência retroativamente é perder ou reordenar as quatro âncoras de `personas`. O histórico do feed mostra uma pessoa, os posts novos mostram outra, e nada no sistema avisa.
+
+O equivalente do `locked: true` hoje é operacional, não declarativo:
+
+- apagar um `media_asset` âncora **zera a FK em silêncio** (`ON DELETE SET NULL`);
+- `GET /v1/media/personas/{id}/identidade` devolve `pode_gerar_com_identidade`, que é o teste mínimo antes de qualquer geração;
+- o painel mostra as quatro âncoras numeradas e avisa quando falta a de rosto ([docs/10 § 4.2](10-painel.md#42-contas-e-personas)).
+
+❓ Não existe validação que impeça a remoção de uma âncora, nem QA por embedding de rosto comparando o gerado com o canônico. É a lacuna mais relevante deste documento.
 
 Para `gossip` e `clipper`, `face_reference` é opcional — a marca visual é do template gráfico, não de um rosto. Nesses casos `canonical_description` descreve a **identidade visual da página** (arte, tipografia, moldura).
 
@@ -1320,13 +1405,21 @@ Campos que **não podem** ser alterados por processo automático em nenhuma hip�
 
 | Campo | Motivo |
 |---|---|
-| `visual.face_reference.persona_engine_id` | Trocar = outra pessoa nas fotos |
-| `visual.face_reference.seed` | Idem; quebra o feed retroativamente |
 | `identity.handle` | Precisa ser mudado na plataforma primeiro |
 | `identity.name` | Identidade |
 | `archetype` | Imutável por definição ([docs/02 § 4.1](02-modelo-de-dados.md#41-archetype)) |
+| `visual.face_reference.*` | **[HERANÇA]** Continua bloqueado por inércia; o objeto não é lido por nada desde a 0008 |
 
-Quando `visual.face_reference.locked = true` (default), a validação recusa qualquer diff nesse objeto sem uma `approvals` aprovada referenciando a mudança.
+**A imutabilidade que importa migrou para fora do card.** Desde a 0008, os campos cuja alteração produz "outra pessoa nas fotos" são colunas de `personas` e FKs para `media_assets`:
+
+| Alvo | Efeito de alterar |
+|---|---|
+| `face_asset_id` e as outras três âncoras | **Outra pessoa nas fotos.** Perder a primeira zera a capacidade de gerar com identidade |
+| A **ordem** das quatro âncoras | O modelo passa a copiar a roupa da referência de rosto — sem erro visível |
+| `physical_desc` | Entra literal no prompt: altera o sujeito de toda imagem futura |
+| `personality_energy` | Move a janela de guarda-roupa e a escolha de pose |
+
+❓ Nenhum desses tem hoje trava equivalente ao `locked` do card: são colunas comuns, alteráveis por `PATCH`. A proteção existente é a numeração visível no painel e o aviso quando falta a âncora de rosto. **Uma `approvals` obrigatória para mudança de âncora é o próximo passo natural.**
 
 ### 6.4 Avisos (não bloqueiam)
 
@@ -1466,4 +1559,6 @@ Tentativa de propor nesses caminhos gera `guardrail_violations` com `rule = 'per
 - [docs/08 — Guardrails e autonomia](08-guardrails-e-autonomia.md) — como `taboos` vira regra executável
 - [docs/09 — LLM Gateway](09-llm-gateway.md) — orçamento de contexto por tipo de chamada
 - [ADR-0001](adr/0001-core-proprio.md) — por que o formato de character file do ElizaOS
-- [docs/contratos/](contratos/) — API da máquina de influencers (`persona_engine_id`, seed, referências faciais)
+- [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md) — por que a identidade visual virou coluna e asset
+- [docs/13 — Geração de mídia](13-geracao-de-midia.md) — as quatro coisas frágeis da consistência facial
+- [docs/14 — Motores de prompt](14-motores-de-prompt.md) — quais colunas o motor lê, e como o guarda-roupa é escolhido

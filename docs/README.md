@@ -23,7 +23,7 @@ O contrato detalhado de cada peça central.
 | Documento | O que contém |
 |---|---|
 | [02-modelo-de-dados.md](02-modelo-de-dados.md) | Cada tabela e coluna explicada, relacionamentos, enums, índices e por que os campos dormentes nascem na v1 |
-| [04-persona-card-spec.md](04-persona-card-spec.md) | Schema do `accounts.persona_card` (formato de *character file* estendido), como preencher para cada arquétipo, versionamento e como ele entra no prompt |
+| [04-persona-card-spec.md](04-persona-card-spec.md) | Schema do `personas.persona_card` (formato de *character file* estendido), como preencher para cada arquétipo, versionamento, como ele entra no prompt — e a divisão entre a identidade comportamental (card) e a visual (colunas + assets) |
 | [05-loop-do-agente.md](05-loop-do-agente.md) | As oito etapas — PLAN, SOURCE, PRODUCE, QA, DISPATCH, VERIFY, RECORD, REFLECT — com entradas, saídas, prompts e o `ContentSource` que varia por arquétipo |
 
 ## Subsistemas
@@ -36,6 +36,8 @@ Os motores que rodam em cima da espinha.
 | [07-monitores.md](07-monitores.md) | Vigias 24/7: intervalo, pool de coletores, regras de disparo, dedup, saúde e o pipeline de baixa latência do furo *(Fase 4)* |
 | [09-llm-gateway.md](09-llm-gateway.md) | LiteLLM roteando os 2 Mac minis e as APIs externas: aliases lógicos, prioridade de fila, fallback, teto diário e contabilidade em `llm_calls` |
 | [10-painel.md](10-painel.md) | Especificação do painel Next.js: princípios de sala de controle, mapa das 9 telas, componentes, tempo real por SSE, design system e anti-requisitos |
+| [13-geracao-de-midia.md](13-geracao-de-midia.md) | O subsistema de imagem e vídeo: a fronteira gateway × cliente fal direto, as quatro coisas frágeis da consistência facial, o registro de modelos com as armadilhas por modelo, a fila de geração, o armazenamento e o que não existe |
+| [14-motores-de-prompt.md](14-motores-de-prompt.md) | O ativo intelectual absorvido: motores determinísticos sem LLM, as camadas do prompt de imagem, o mecanismo de tags e ordinais, o algoritmo de guarda-roupa, os arquétipos de profissão e a política de porte verificada por teste diferencial |
 
 ## Operação
 
@@ -54,7 +56,7 @@ Os serviços que o core chama — e nunca duplica.
 
 | Documento | O que contém |
 |---|---|
-| [03-integracoes.md](03-integracoes.md) | Como o core fala com android-orchestrator, máquina de influencers, android-manager e media-forge: interface única, retry, dry-run e propagação de `trace_id` |
+| [03-integracoes.md](03-integracoes.md) | Como o core fala com android-orchestrator, android-manager e media-forge: interface única, retry, dry-run e propagação de `trace_id`. ⚠️ A **máquina de influencers** deixou de ser integração — foi absorvida ([ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md)) e agora é [docs/13](13-geracao-de-midia.md) |
 | [contratos/](contratos/) | Um arquivo por serviço com endpoints, payloads e exemplos **reais** de request/response. É o que as fixtures de dry-run e os mocks de teste espelham |
 
 ## Processo
@@ -81,6 +83,12 @@ Como o projeto avança e o que já foi decidido.
 | [0008](adr/0008-recon-antes-da-campanha.md) | Campanha de engajamento exige recon: olhar o conteúdo antes de planejar |
 | [0009](adr/0009-niveis-de-autonomia.md) | L0–L3 como propriedade da conta, com promoção por histórico; `gossip` nunca chega a L3 |
 | [0010](adr/0010-llm-gateway-litellm.md) | LiteLLM como gateway de LLM, com prioridade de fila e overflow para API externa |
+| [0011](adr/0011-polling-e-registro-de-nos.md) | Polling e registro de nós: sem webhook do orchestrator, a chave externa é `(node_id, external_task_id)` |
+| [0012](adr/0012-servidor-com-varios-servicos.md) | Um servidor roda vários serviços: `servers → server_services`, e `devices` vira tabela de verdade |
+| [0013](adr/0013-persona-separada-da-conta.md) | A persona é separada da conta: identidade, login e lugar onde ele roda são três coisas |
+| [0014](adr/0014-absorver-a-maquina-de-influencers.md) | Absorver a máquina de influencers: a identidade visual vira coluna e asset, os motores de prompt são portados sem alteração semântica |
+
+> A tabela completa, com resumo do trade-off de cada decisão, está em [adr/README.md](adr/README.md).
 
 ---
 
@@ -103,7 +111,7 @@ Objetivo: entender o modelo mental e conseguir rodar o loop em dry-run no primei
 
 **Depois:** `cp .env.example .env && make up && make seed`. Acompanhe pelo painel em http://localhost:3000 e confira o rastro em `events` filtrando pelo `trace_id`. O executor do loop por linha de comando chega na Fase 1 — ver [fases/fase-1-primeira-influencer.md](fases/fase-1-primeira-influencer.md).
 
-> Antes do primeiro PR: [04-persona-card-spec.md](04-persona-card-spec.md) se for mexer em prompt, [03-integracoes.md](03-integracoes.md) + [contratos/](contratos/) se for mexer em cliente externo, [10-painel.md](10-painel.md) se for mexer no painel.
+> Antes do primeiro PR: [04-persona-card-spec.md](04-persona-card-spec.md) se for mexer em prompt de texto, [13-geracao-de-midia.md](13-geracao-de-midia.md) + [14-motores-de-prompt.md](14-motores-de-prompt.md) **se for mexer em qualquer coisa de imagem ou vídeo** (a consistência facial quebra em silêncio), [03-integracoes.md](03-integracoes.md) + [contratos/](contratos/) se for mexer em cliente externo, [10-painel.md](10-painel.md) se for mexer no painel.
 
 ### 🎛 Operador do dia a dia
 
@@ -154,7 +162,7 @@ Objetivo: plugar um serviço externo sem furar a fronteira do core.
 | Regra | Detalhe |
 |---|---|
 | Idioma | Prosa em português do Brasil; identificadores em inglês. Ver [glossário §3](glossario.md) |
-| Numeração | `NN-nome.md` define ordem de leitura. `00`–`12` reservados; documentos sem número são transversais (glossário, este índice) |
+| Numeração | `NN-nome.md` define ordem de leitura. `00`–`14` reservados; documentos sem número são transversais (glossário, este índice) |
 | Schema | Nenhum documento redefine schema. Todos citam `db/migrations/0001_initial.sql` |
 | Decisão | Escolha de arquitetura vira ADR, não parágrafo perdido em documento de subsistema |
 | Fase | Todo recurso indica em que fase acorda. Campo dormente é marcado como tal |

@@ -6,8 +6,11 @@ guarda-roupa, marcas, mídia gerada e rascunhos de vídeo.
 
     docker compose exec api python -m olimpo.db.importar_maquina
 
-Idempotente: reexecutar não duplica — as personas casam por `legacy_id` e a
-mídia por hash de conteúdo.
+Idempotente: reexecutar não duplica. Isso é garantido por índices únicos
+(`legacy_id` em marcas e figurinos, hash de conteúdo em mídia, persona+prompt
+em rascunhos), não por o código lembrar de checar — a primeira versão
+prometia idempotência com `ON CONFLICT DO NOTHING` sem restrição nenhuma
+para o conflito acontecer, e duplicou tudo na segunda execução.
 
 ⚠️ A ordem das referências de identidade é contrato, não detalhe. O rosto é
 sempre a primeira; a folha de personagem, a segunda; os dois close-ups vêm
@@ -254,6 +257,7 @@ class Importador:
                          shot_mode, camera, vibe, voice, environment, product_worn,
                          notes, params, created_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s)
+                    ON CONFLICT (persona_id, md5(prompt)) DO NOTHING
                     """,
                     (
                         persona_id, d.get("dialogue"), d["prompt"], d.get("duration"),
@@ -296,7 +300,9 @@ class Importador:
                     INSERT INTO wardrobe_items
                         (persona_id, name, asset_id, sort_order, legacy_id, created_at)
                     VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (legacy_id) WHERE legacy_id IS NOT NULL
+                    DO UPDATE SET asset_id = COALESCE(EXCLUDED.asset_id,
+                                                      wardrobe_items.asset_id)
                     """,
                     (persona_id, linha["name"] or "sem nome", asset,
                      linha["sort_order"] or 0, linha["id"],
@@ -326,7 +332,10 @@ class Importador:
                     INSERT INTO brands (persona_id, name, category, asset_ids,
                                         product_sheet_asset_id, legacy_id, created_at)
                     VALUES (%s,%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (legacy_id) WHERE legacy_id IS NOT NULL
+                    DO UPDATE SET product_sheet_asset_id =
+                        COALESCE(EXCLUDED.product_sheet_asset_id,
+                                 brands.product_sheet_asset_id)
                     """,
                     (persona_id, linha["brand"] or "sem nome", linha["category"],
                      fotos, folha, linha["id"], quando(linha["created_at"])),

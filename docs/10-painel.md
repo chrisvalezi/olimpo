@@ -264,16 +264,21 @@ Tudo sobre um login. Cabeçalho com badge de plataforma, handle, presença, `ext
 
 **Propósito.** A identidade, separada do login. A Luna Prado existe mesmo que nenhuma conta exista, e o Instagram e o WhatsApp dela são a **mesma** personagem, com uma memória só.
 
-Um cartão por persona — e aqui cartão **cabe**, porque personas são dezenas, não milhares. Cada um mostra nome, `slug`, nicho principal do card, contagem de memórias, arco ativo, e a lista de **logins vinculados** (badge de plataforma, handle, situação, seguidores), cada um linkando para a ficha da conta.
+Um cartão por persona — e aqui cartão **cabe**, porque personas são dezenas, não milhares. Cada um mostra **o rosto** (a âncora `face`), nome, `slug`, nicho principal do card, contagem de memórias, arco ativo, e a lista de **logins vinculados** (badge de plataforma, handle, situação, seguidores), cada um linkando para a ficha da conta.
+
+**A lista mostra o rosto porque a lista é sobre pessoas.** Uma grade de nomes obriga a abrir cada ficha para saber de quem se está falando; a miniatura resolve isso em um relance. Persona sem âncora de rosto aparece com o lugar vazio marcado — e o vazio é informação, não falta de polimento.
 
 | Elemento | O que mostra |
 |---|---|
+| Miniatura | `personas.face_asset_id` → `GET /v1/media/{id}/arquivo`. Sem âncora, placeholder marcado |
 | Busca | por nome da persona |
 | Aviso de card vazio | faixa âmbar: *"Sem persona card. Sem ele a LLM não tem voz para escrever — a conta não deve sair de L0"* |
 | Sem logins | *"nenhum login vinculado"* — persona cadastrada e ainda sem conta é estado válido |
-| `Nova persona` | nome, `slug` (derivado do nome se vazio), descrição, `persona_engine_id`, rótulos, observações |
+| `Nova persona` | nome, `slug` (derivado do nome se vazio), descrição, rótulos, observações |
 
-`GET /v1/personas?q=` · `POST /v1/personas` · `POST /v1/personas/{id}/notes`
+> ⚠️ **A miniatura vem em tamanho cheio.** Não existem thumbnails ([docs/13 § 9](13-geracao-de-midia.md#9-o-que-não-existe)); uma lista de 40 personas baixa 40 originais. Enquanto personas são dezenas, isso é aceitável — quando forem centenas, deixa de ser.
+
+`GET /v1/personas?q=` · `POST /v1/personas` · `POST /v1/personas/{id}/notes` · `GET /v1/media/{id}/arquivo`
 
 #### Editor da persona — `/personas/[id]`
 
@@ -292,6 +297,58 @@ Alternar entre os modos preserva o conteúdo: sair do JSON reinterpreta o texto;
 
 > ❓ O editor ainda **não** exige `change_note` nem mostra diff lado a lado das versões, que a spec de persona pede. O histórico é gravado; a interface para lê-lo ainda não existe.
 
+#### Identidade visual — bloco da ficha da persona
+
+> Migração 0008 · [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md) · mecanismo em [docs/13 § 3](13-geracao-de-midia.md#3-consistência-facial--as-quatro-coisas-frágeis)
+
+A ficha da persona ganhou um bloco que **não é uma galeria**: são as quatro imagens que ancoram o rosto da personagem, mostradas **na ordem em que entram no prompt**, com a numeração visível.
+
+```
+Identidade visual                                        3 de 4 âncoras
+
+┌──────────────┐ ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
+│              │ │              │ │              │ │      —       │
+│   [ rosto ]  │ │  [ folha ]   │ │  [ close ]   │ │   ausente    │
+│              │ │              │ │              │ │              │
+├──────────────┤ ├──────────────┤ ├──────────────┤ ├──────────────┤
+│ @image1      │ │ @image2      │ │ @image3      │ │ @image4      │
+│ rosto        │ │ folha de     │ │ close de     │ │ cartela de   │
+│              │ │ personagem   │ │ rosto        │ │ detalhe      │
+└──────────────┘ └──────────────┘ └──────────────┘ └──────────────┘
+```
+
+| Elemento | O que mostra | Por quê |
+|---|---|---|
+| **A numeração `@image1..@image4`** | A posição de cada âncora no array de referências | **A ordem é contrato, não enfeite.** É como o prompt endereça cada imagem; expô-la é o que impede alguém de reordenar achando que está organizando |
+| **O rótulo em português** | rosto · folha de personagem · close de rosto · cartela de detalhe | O papel de cada uma, para quem não decorou os nomes técnicos |
+| **A contagem** | *"3 de 4 âncoras"* | Quantas existem importa mais do que quais |
+| **Posições vazias** | Ficam no lugar, marcadas como ausentes | Uma grade que só mostra o que existe esconde exatamente o que precisa ser visto |
+| **Aviso de rosto ausente** | Faixa âmbar quando falta `face_asset_id` | Ver abaixo |
+| **Referências extras** | `reference_asset_ids`, em fila separada **depois** das quatro | Elas entram no fim do array; mostrá-las misturadas sugeriria que a posição delas é negociável |
+
+**A faixa quando falta a referência de rosto.** `pode_gerar_com_identidade = false` significa que qualquer geração produz uma pessoa diferente — e isso precisa estar dito em texto, no lugar em que a decisão é tomada:
+
+> ⚠️ *"Esta persona não tem imagem de rosto. Sem ela não há identidade a preservar: **qualquer geração produz uma pessoa diferente**. Gere a folha de identidade antes de produzir conteúdo."*
+
+**Por que expor a numeração para o operador.** É a única defesa de interface contra o modo de falha central do subsistema. Reordenar as âncoras não gera erro, não gera alerta, e o sintoma — rostos que derivam — aparece semanas depois, quando já há posts publicados. Um rótulo `@image2` na tela transforma uma armadilha invisível em algo que se lê.
+
+`GET /v1/media/personas/{id}/identidade` · `GET /v1/media/{id}/arquivo`
+
+#### Galeria do conteúdo produzido
+
+Abaixo do bloco de identidade, o que a persona já produziu: grade paginada de `media_assets`, mais recente primeiro.
+
+| Elemento | Detalhe |
+|---|---|
+| Filtros | papel (`role`) e tipo (`kind`) — as âncoras aparecem separadas do conteúdo `generated` |
+| Cada item | miniatura, data, modelo e provider usados |
+| Ao abrir | **o prompt exato que gerou aquilo** (`media_assets.prompt`) e as referências usadas, na ordem |
+| Paginação | no servidor (`page`, `per_page` até 200) — a mesma disciplina de §4.2 |
+
+**O prompt visível é o que fecha o ciclo de auditoria visual.** O equivalente do `ReasoningPanel` para imagem: a pergunta *"por que essa foto saiu assim?"* precisa ter resposta sem `psql`. E `escolhas` do motor de prompt registra cena, horário, pose, prop, look e paleta sorteados — ❓ ainda não exposto na interface.
+
+`GET /v1/media?persona_id=&role=&kind=&page=&per_page=`
+
 ---
 
 #### Abas da conta — planejadas
@@ -301,7 +358,7 @@ O restante da ficha do agente, ainda por implementar. A tabela abaixo é especif
 | Aba | Conteúdo | Endpoint / tabelas |
 |---|---|---|
 | **Visão** | `AccountCard` expandido, arco ativo, plano de hoje, últimas 5 tasks, alerta de guardrail recente | `GET /v1/accounts/{id}` → `accounts`, `story_arcs` (`active`), `day_plans` de hoje, `tasks`, `guardrail_violations` |
-| **Persona** | `PersonaCard` — leitura formatada de `personas.persona_card` por seção (identidade, voz, tabus, estética, linha editorial, `persona_engine_id`), com link para o editor da persona. **A edição não é por conta:** o card é da personagem e vale para todos os logins dela | `GET /v1/personas/{id}` → `personas`, `persona_versions` |
+| **Persona** | `PersonaCard` — leitura formatada de `personas.persona_card` por seção (identidade, voz, tabus, estética, linha editorial) **e das quatro âncoras de identidade visual**, com link para o editor da persona. **A edição não é por conta:** o card é da personagem e vale para todos os logins dela | `GET /v1/personas/{id}` → `personas`, `persona_versions`; `GET /v1/media/personas/{id}/identidade` |
 | **Memória** | linha do tempo de `memories` filtrável por `kind` (episódica · semântica · narrativa), com `importance` como peso visual e busca semântica | `GET /v1/accounts/{id}/memories?kind=&q=` → `memories` (busca por `embedding`, ordenação por `occurred_at`) |
 | **Arco** | arco atual (`title`, `summary`, `state`), régua de `starts_at`→`ends_at`, arcos passados | `GET /v1/accounts/{id}/arcs` → `story_arcs` |
 | **Agenda** | plano do dia: `narrative`, `intents` como cartões, `reasoning` no `ReasoningPanel`, e as tasks derivadas na `TaskTimeline` com `active_hours` sombreado | `GET /v1/accounts/{id}/day-plan?date=` → `day_plans`, `tasks` |
@@ -895,7 +952,7 @@ Regras que valem para as três:
 | Fase | O que o painel ganha |
 |---|---|
 | **0** | Página única read-only: contas, tasks, últimos 100 `events`. Sem ações. Prova o encanamento |
-| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas · **Contas em tabela densa com facetas e lote, e a tela de Personas** (§4.2) |
+| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas · **Contas em tabela densa com facetas e lote, e a tela de Personas** (§4.2) · **bloco de identidade visual e galeria de mídia na ficha da persona** (§4.2) |
 | **2** | Tela de interações · promoção de autonomia com confirmação dupla · aba de amostragem L2 · métricas de post na ficha |
 | **3** | Campanhas inteiras: wizard, `SpreadPolicyEditor`, `ReconViewer`, revisão de plano, timeline de execução · biblioteca de conteúdo |
 | **4** | Monitores 24/7 · fila de revisão dedicada a fofoca com `claim_status` obrigatório e lote proibido |
@@ -916,5 +973,8 @@ Regras que valem para as três:
 - `docs/11-observabilidade.md` — métricas, `events` e `trace_id`
 - `docs/adr/0012-servidor-com-varios-servicos.md` — o modelo por trás da tela de Servidores
 - `docs/adr/0013-persona-separada-da-conta.md` — o modelo por trás das telas de Contas e Personas
+- `docs/13-geracao-de-midia.md` — o que o bloco de identidade visual expõe, e por que a ordem aparece na tela
+- `docs/14-motores-de-prompt.md` — o `escolhas` que a galeria ainda não mostra
+- `docs/adr/0014-absorver-a-maquina-de-influencers.md` — por que Photo Studio e Content Studio precisam nascer de novo em Next.js
 - `docs/contratos/android-manager.md` — o que a frota expõe, e o que ela **não** expõe
 - `db/migrations/0001_initial.sql` — fonte da verdade do schema

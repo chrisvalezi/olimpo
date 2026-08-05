@@ -1,6 +1,6 @@
 # 02 — Modelo de dados
 
-> Fonte da verdade: os arquivos em [`db/migrations/`](../db/migrations/) — [`0001_initial.sql`](../db/migrations/0001_initial.sql) para o núcleo, [`0002_orchestrator_nodes.sql`](../db/migrations/0002_orchestrator_nodes.sql) para a ligação com o orchestrator, [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) para servidores, serviços, devices e inventário de contas, e [`0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) para a separação entre persona, login e lugar onde ele roda ([ADR-0013](adr/0013-persona-separada-da-conta.md)).
+> Fonte da verdade: os arquivos em [`db/migrations/`](../db/migrations/) — [`0001_initial.sql`](../db/migrations/0001_initial.sql) para o núcleo, [`0002_orchestrator_nodes.sql`](../db/migrations/0002_orchestrator_nodes.sql) para a ligação com o orchestrator, [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) para servidores, serviços, devices e inventário de contas, [`0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) para a separação entre persona, login e lugar onde ele roda ([ADR-0013](adr/0013-persona-separada-da-conta.md)), e [`0008_absorve_maquina_de_influencers.sql`](../db/migrations/0008_absorve_maquina_de_influencers.sql) para a identidade **visual** — mídia, guarda-roupa, marcas e fila de geração ([ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md)).
 > Este documento **descreve** aqueles arquivos. Se os dois divergirem, o SQL vence e este documento está com bug.
 
 Postgres 16 + três extensões: `uuid-ossp` (chaves), `vector` (pgvector, memória semântica), `pg_trgm` (busca aproximada em texto — dedup e QA de caption).
@@ -185,7 +185,7 @@ Quatro FKs são adicionadas via `ALTER TABLE` no fim da migração porque formam
 
 ## 3. Tabelas
 
-Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança → **infraestrutura** ([3.26](#326-infraestrutura-um-servidor-vários-serviços) a [3.31](#331-campos-novos-em-accounts-e-account_placements), migrações 0005/0006) → **identidade** ([3.32](#332-personas) em diante, migração 0007).
+Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança → **infraestrutura** ([3.26](#326-infraestrutura-um-servidor-vários-serviços) a [3.31](#331-campos-novos-em-accounts-e-account_placements), migrações 0005/0006) → **identidade** ([3.32](#332-personas) a [3.35](#335-situação-e-presença-dois-eixos-ortogonais), migração 0007) → **identidade visual e geração** ([3.36](#336-media_assets) a [3.42](#342-remoções-e-realinhamentos-da-0008), migração 0008).
 
 Convenções desta seção:
 - Todas as colunas `id uuid` usam `DEFAULT uuid_generate_v4()`, exceto `events.id` (`bigserial`).
@@ -239,10 +239,10 @@ Tenant. Existe porque clipagem é tipicamente serviço prestado a terceiros, e c
 | `status` | `account_status` = `registered` | **Situação:** o que *nós* queremos da conta. Era `draft` até a 0007 — ver [3.35](#335-situação-e-presença-dois-eixos-ortogonais) |
 | `autonomy` | `autonomy_level` = `L0` | Quanto o agente pode fazer sem humano |
 | `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
-| `persona_card` | `jsonb` = `{}` | **[HERANÇA — removida na 0008]** Use [`personas.persona_card`](#332-personas). Marcada por `COMMENT ON COLUMN` |
-| `persona_version` | `integer` = `1` | **[HERANÇA]** Espelha o card antigo. A versão vigente é `personas.persona_version` |
-| `persona_engine_id` | `text` | **[HERANÇA]** ID na **máquina de influencers**; a fonte é `personas.persona_engine_id` |
-| `device_binding` | `jsonb` = `{}` | **[HERANÇA — removida na 0008]** Use `account_placements`. Marcada por `COMMENT ON COLUMN` |
+| ~~`persona_card`~~ | — | **[REMOVIDA na 0008]** Use [`personas.persona_card`](#332-personas) |
+| ~~`persona_version`~~ | — | **[REMOVIDA na 0008]** A versão vigente é `personas.persona_version` |
+| ~~`persona_engine_id`~~ | — | **[REMOVIDA na 0008]** A máquina de influencers não existe mais; a identidade visual são colunas de `personas` + `media_assets` ([3.37](#337-campos-novos-em-personas-migração-0008)) |
+| ~~`device_binding`~~ | — | **[REMOVIDA na 0008]** Use `account_placements` |
 | `cadence` | `jsonb` = `{"posts_per_day":1,"stories_per_day":3}` | Ritmo natural. **Teto** — campanha não pode ultrapassar |
 | `timezone` | `text` = `America/Sao_Paulo` | Fuso da persona, não do servidor |
 | `active_hours` | `int4range` = `[8,23)` | Janela "acordada" em horas locais. Fora dela o agente não age |
@@ -255,14 +255,14 @@ Tenant. Existe porque clipagem é tipicamente serviço prestado a terceiros, e c
 
 Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram e no TikTok como dois logins. Desde a 0007, os dois podem pertencer à **mesma persona**, e aí a memória é compartilhada.
 
-> A tabela acima é a da migração 0001. Os campos de **inventário** (`external_id`, `following`, `media_count`, `jid`, `last_synced_at`, `discovered_from`) vieram na 0006 e estão em [3.31](#331-campos-novos-em-accounts-e-account_placements); os de **identidade e operação** (`persona_id`, `role`, `profile`, `secret_ref`, `labels`, `metadata`, `last_seen_in_inventory`, `previous_handles`) vieram na 0007 e estão em [3.34](#334-campos-novos-em-accounts-migração-0007).
+> A tabela acima é a da migração 0001. Os campos de **inventário** (`external_id`, `following`, `media_count`, `jid`, `last_synced_at`, `discovered_from`) vieram na 0006 e estão em [3.31](#331-campos-novos-em-accounts-e-account_placements); os de **identidade e operação** (`persona_id`, `role`, `profile`, `secret_ref`, `labels`, `metadata`, `last_seen_in_inventory`, `previous_handles`) vieram na 0007 e estão em [3.34](#334-campos-novos-em-accounts-migração-0007). **As quatro colunas de herança saíram na 0008** — ver [3.42](#342-remoções-e-realinhamentos-da-0008).
 
 **Quando usar / armadilhas.**
 - `active_hours` é `int4range` de **horas inteiras locais**, não `timestamptz`. `[8,23)` = das 08:00 às 22:59. Range que cruza a meia-noite (ex.: madrugada de conta noturna) **não** é representável em um único range — use `[0,3)` + política no código, ou reveja a persona. Isto é uma limitação conhecida do schema v1.
 - `cadence` aqui é o **teto operacional**; `persona_card.cadence` é a **intenção editorial**. Divergiram? O banco vence. O painel deve mostrar os dois.
 - `mood` é jsonb sem schema fixo de propósito: o formato ainda está sendo descoberto na Fase 1/3. Não crie índice nele antes de estabilizar.
-- **`device_binding` é herança e não é fonte da verdade.** Onde a conta vive passou a ser `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representa. Leia dos placements; a 0007 marcou a coluna com `COMMENT ON COLUMN` e a 0008 a remove.
-- **`persona_card` também é herança**, pelo mesmo mecanismo e com o mesmo prazo. A janela em que as duas colunas convivem é o custo declarado da [ADR-0013](adr/0013-persona-separada-da-conta.md): uma consulta escrita por hábito lê o card velho e **não falha** — devolve dado desatualizado em silêncio. Ao tocar em qualquer código que leia persona, confira se ele já lê de `personas`.
+- **`device_binding` saiu na 0008.** Onde a conta vive é `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representava. A 0007 marcou a coluna com `COMMENT ON COLUMN` e a 0008 a removeu.
+- **`persona_card`, `persona_version` e `persona_engine_id` saíram junto.** A janela em que as colunas conviveram foi o custo declarado da [ADR-0013](adr/0013-persona-separada-da-conta.md): enquanto durou, uma consulta escrita por hábito lia o card velho e **não falhava** — devolvia dado desatualizado em silêncio. Agora falha alto, que é o comportamento desejado. Código antigo que ainda selecione essas colunas quebra na 0008, e isso é a mecânica funcionando.
 - Deletar uma `account` cascateia conteúdo, posts, interações, tasks, aprovações e violações — e **não** apaga memória, arcos nem planos, que desde a 0007 pertencem à persona. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste, e a API exige `confirm=apagar-de-verdade`.
 - **Ausência de inventário não é ausência de conta.** Se todos os logins saírem dos devices, somem os `account_placements`; a conta, a persona, as observações e o histórico continuam. Ver [3.35](#335-situação-e-presença-dois-eixos-ortogonais).
 
@@ -275,7 +275,8 @@ Histórico imutável do Persona Card. Responde "por que ela mudou de voz na sema
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `uuid` PK | |
-| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE`. **[HERANÇA desde a 0008]** |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. **Coluna da 0008** — o histórico do card pertence à personagem |
 | `version` | `integer` obrig. | Inteiro monotônico por conta |
 | `persona_card` | `jsonb` obrig. | Snapshot **completo** do card nessa versão (não é diff) |
 | `changed_by` | `text` | `human:chris` \| `agent:reflect` \| `migration:0007` |
@@ -286,7 +287,16 @@ Restrição: `UNIQUE (account_id, version)`.
 
 **Quando usar / armadilhas.** Grave a versão **antes** de sobrescrever o card, na mesma transação. Snapshot completo é escolha consciente: diffs economizam bytes e custam a capacidade de reconstruir o prompt exato de um post antigo. Nunca faça `UPDATE` em uma linha aqui — é append-only.
 
-> ⚠️ **A tabela continua ancorada em `account_id`, mas o card mudou de casa.** Desde a 0007 o card vive em `personas.persona_card` e é editado por `PATCH /v1/personas/{id}`, que incrementa `personas.persona_version` e grava **uma linha por conta vinculada** à persona. Uma persona com três logins gera três linhas por bump, com o mesmo `version` e o mesmo snapshot. Funciona e é auditável, mas é modelagem torta: o alvo natural é `persona_versions.persona_id`, e está registrado como dívida da 0008 ([ADR-0013](adr/0013-persona-separada-da-conta.md) § Consequências).
+> ✅ **A dívida da 0007 foi paga na 0008.** Enquanto a tabela era chaveada só por `account_id`, uma persona com três logins gerava três linhas por bump, com o mesmo `version` e o mesmo snapshot — funcionava, era auditável e era modelagem torta. A 0008 acrescentou `persona_id` e fez o backfill a partir de `accounts.persona_id`:
+>
+> ```sql
+> UPDATE persona_versions pv
+>    SET persona_id = a.persona_id
+>   FROM accounts a
+>  WHERE a.id = pv.account_id AND a.persona_id IS NOT NULL;
+> ```
+>
+> O índice novo é `idx_persona_versions_persona (persona_id, version DESC)`, e é por ele que o histórico deve ser lido. `account_id` continua na tabela como herança: as linhas antigas dependem dele, e a `UNIQUE (account_id, version)` ainda vale. ❓ Linhas cuja conta de origem já tinha sido desvinculada (`persona_id IS NULL`) ficaram sem `persona_id` — o backfill não tinha de onde tirar o dono.
 
 ---
 
@@ -1042,7 +1052,7 @@ Restrição: `UNIQUE (platform, external_id) WHERE external_id IS NOT NULL`.
 | `description` | `text` | Resumo em uma linha, para a lista |
 | `persona_card` | `jsonb` = `{}` | **A "alma": voz, tabus, estética, lore, cadência. Fonte da verdade.** Spec em [docs/04](04-persona-card-spec.md) |
 | `persona_version` | `integer` = `1` | Versão corrente do card. Incrementada a cada edição |
-| `persona_engine_id` | `text` | ID na **máquina de influencers**. É a referência facial que impede a personagem de mudar de rosto entre posts |
+| `persona_engine_id` | `text` | **[HERANÇA desde a 0008]** ID na máquina de influencers, que deixou de existir. A identidade visual agora é coluna daqui + `media_assets` ([3.37](#337-campos-novos-em-personas-migração-0008)) |
 | `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
 | `labels` | `text[]` = `{}` | Rótulos livres, com índice gin — servem para filtrar e agir em lote |
 | `notes` | `text` | Anotação humana livre. Histórico datado é [`entity_notes`](#333-entity_notes) |
@@ -1055,8 +1065,8 @@ Restrição: `UNIQUE (platform, external_id) WHERE external_id IS NOT NULL`.
 - **Uma persona, vários logins.** `accounts.persona_id` aponta para cá; o Instagram e o WhatsApp da mesma personagem são duas linhas de `accounts` e **uma** linha aqui. O `persona_card` vale para todos eles.
 - **`persona_card = '{}'` significa "card por escrever", não "não tem persona".** Quem não tem persona é a conta com `persona_id IS NULL`. Persona sem card não deve sair de `L0`: sem voz declarada, a LLM escreve genérico.
 - **`slug` é único globalmente.** A migração 0007 gera o slug a partir do handle da conta de origem por regex; duas contas homônimas em plataformas diferentes colidem e a segunda cai no `ON CONFLICT (slug) DO NOTHING`, ficando sem persona. É esperado e precisa de conferência manual.
-- **Apagar a persona não apaga os logins** (`accounts.persona_id` é `ON DELETE SET NULL`) — mas apaga memória, arcos e planos (`ON DELETE CASCADE`). Aposente com `active = false`.
-- `persona_engine_id` aqui é a fonte; a coluna homônima em `accounts` é herança.
+- **Apagar a persona não apaga os logins** (`accounts.persona_id` é `ON DELETE SET NULL`) — mas apaga memória, arcos e planos (`ON DELETE CASCADE`). **Desde a 0008 apaga também mídia, guarda-roupa, marcas exclusivas, jobs e rascunhos de vídeo**, todos `ON DELETE CASCADE`. Aposente com `active = false`; um `DELETE` aqui destrói as quatro imagens de identidade, e elas **não se regeneram** — não existe como pedir "o mesmo rosto de antes".
+- `persona_engine_id` é herança desde a 0008, aqui e em `accounts`. A tabela ganhou 18 colunas na 0008 ([3.37](#337-campos-novos-em-personas-migração-0008)), e é lá que a identidade visual vive.
 
 ---
 
@@ -1172,9 +1182,210 @@ END
 
 ---
 
+### 3.36 `media_assets`
+
+> Fonte: [`0008_absorve_maquina_de_influencers.sql`](../db/migrations/0008_absorve_maquina_de_influencers.sql). Decisão em [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md). Subsistema em [docs/13](13-geracao-de-midia.md).
+
+**Toda imagem, vídeo e áudio do sistema.** Da folha de personagem que ancora o rosto ao reels publicado ontem — a mesma tabela, distinguida por `role`.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. Nulável: mídia de catálogo geral não pertence a personagem nenhuma |
+| `kind` | `media_kind` = `image` | `image` \| `video` \| `audio` — ver [4.13](#413-media_kind-e-media_role) |
+| `role` | `media_role` = `generated` | O papel. **As quatro primeiras ancoram a identidade** |
+| `storage_path` | `text` | Caminho no **nosso** armazenamento, relativo a `/app/media` |
+| `source_url` | `text` | De onde veio originalmente. Guardado **para rastrear, nunca para servir** |
+| `content_hash` | `text` | Dedupe: o mesmo arquivo nunca duplica |
+| `mime` / `width` / `height` / `bytes` | | Metadados do arquivo |
+| `duration_seconds` | `real` | Só para vídeo e áudio |
+| `prompt` | `text` | **O prompt exato que gerou isto.** Reprodutibilidade |
+| `provider` / `model` / `aspect_ratio` | `text` | Quem gerou, com quê, em que formato |
+| `params` | `jsonb` = `{}` | Parâmetros da geração |
+| `reference_ids` | `uuid[]` = `{}` | Quais imagens foram usadas como referência, **NA ORDEM** |
+| `label` | `text` | Rótulo humano |
+| `source` | `text` | `photo_studio` \| `profile` \| `wardrobe` \| … |
+| `legacy_id` | `text` | ID na máquina de influencers, para a importação |
+| `created_at` | `timestamptz` | |
+
+Índices: `idx_media_persona (persona_id, created_at DESC)` · `idx_media_role (persona_id, role)` · `idx_media_kind (kind, created_at DESC)` · `idx_media_hash` **UNIQUE** em `(content_hash) WHERE content_hash IS NOT NULL`.
+
+**Quando usar / armadilhas.**
+- **`reference_ids` é ordenado e a ordem é semântica.** `@image1` é o rosto, `@image2` é a roupa. Gravar embaralhado não quebra nada na hora — **inutiliza o registro** para reproduzir a geração depois. Ver [docs/13 § 3](13-geracao-de-midia.md#3-consistência-facial--as-quatro-coisas-frágeis).
+- **`source_url` não serve arquivo.** As URLs do fal expiram e o CDN de origem vai ser desligado; foi exatamente esse risco que motivou baixar 1,6 GB antes de escrever o importador. Servir a partir dele reintroduz a dependência que a absorção eliminou.
+- **O índice único de hash é parcial.** `content_hash IS NULL` (mídia importada sem hash calculado) não colide — é o que permite reexecutar o importador sem conflito.
+- **Uma linha com `role IN ('face','character_sheet','close_up_face','close_up_detail')` é referenciada por `personas`.** A FK é `ON DELETE SET NULL`: apagar o asset não apaga a persona, mas **zera a âncora em silêncio**. Depois disso, toda geração produz uma pessoa diferente.
+- `prompt` é o que torna possível auditar uma imagem publicada. Também é o único caminho de reverificação do porte quando a origem em JavaScript não existir mais ([docs/14 § 9.2](14-motores-de-prompt.md#92-o-que-o-teste-diferencial-não-cobre)).
+
+---
+
+### 3.37 Campos novos em `personas` (migração 0008)
+
+A persona deixa de ser só comportamental. Os campos que **alimentam a geração de imagem** viram colunas de verdade — não jsonb — porque o motor de prompt os lê a cada geração e eles precisam ser validáveis.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `gender` | `text` | Dirige o pool de guarda-roupa, as poses e os pronomes do prompt de vídeo. **É o campo mais consultado pelo motor de prompt** |
+| `apparent_age` | `integer` | Idade aparente |
+| `physical_desc` | `text` | String canônica montada dos atributos. **Entra LITERALMENTE no bloco de sujeito de todo prompt** |
+| `backstory` | `text` | A história. É contra ela que os 100 arquétipos de profissão testam suas regex |
+| `personality_energy` | `integer` = `50`, `CHECK BETWEEN 0 AND 100` | Define a janela de energia do guarda-roupa, a escolha de pose e a nota de styling. **Não é decorativo** — tem `COMMENT ON COLUMN` dizendo isso |
+| `niches` | `text[]` = `{}` | Índice gin `idx_personas_niches` |
+| `vibe_words` | `text[]` = `{}` | Hard-filtram o pool de guarda-roupa |
+| `clothing_style` | `text` | |
+| `palette` | `text[]` = `{}` | |
+| `content_pillars` | `text[]` = `{}` | |
+| `backstory_context` | `jsonb` = `{}` | Resultado da classificação por LLM (tags de estilo + nicho de cena). **Na origem era recalculado a cada geração porque não persistia** |
+| `face_asset_id` | `uuid` → `media_assets` | **Âncora 1 — o rosto.** `ON DELETE SET NULL` |
+| `character_sheet_asset_id` | `uuid` → `media_assets` | **Âncora 2 — a roupa e o corpo** |
+| `close_up_face_asset_id` | `uuid` → `media_assets` | **Âncora 3 — textura de pele** |
+| `close_up_detail_asset_id` | `uuid` → `media_assets` | **Âncora 4 — o detalhe fino** |
+| `reference_asset_ids` | `uuid[]` = `{}` | Fotos extras do **mesmo** rosto em outros ângulos. Entram **no fim** do array para não deslocar as posições das tags |
+| `home_slots` | `jsonb` = `[]` | Cenários recorrentes da personagem (a "casa" dela) |
+| `legacy_id` | `text` **UNIQUE** | ID na máquina de influencers. É por ele que o importador é idempotente |
+
+**Quando usar / armadilhas.**
+- **A ordem das quatro âncoras é contrato, não convenção.** `face → character_sheet → close_up_face → close_up_detail`. A mesma ordem está declarada em `olimpo/prompts/tipos.py`, em `olimpo/api/routers/media.py` e no importador, e aparece numerada na interface. Reordenar faz o modelo copiar a roupa da referência de rosto — sem erro, sem alerta, e com o sintoma aparecendo semanas depois.
+- **`reference_asset_ids` vai depois, sempre.** Colocar uma referência extra antes das âncoras desloca todas as posições e invalida todas as tags `@imageN` do prompt de uma vez.
+- **`physical_desc` entra literal no prompt.** Não é campo de anotação: uma frase mal escrita aqui vira uma frase mal escrita dentro do prompt de toda imagem gerada.
+- **`personality_energy` tem `CHECK` porque um valor fora de 0–100 não falha — distorce.** A pontuação de guarda-roupa mede *distância* até esse número; um `150` só faria todos os looks parecerem igualmente ruins.
+- **Divisão de responsabilidade com `persona_card`:** o que **alimenta a geração** é coluna; o que o Olimpo acrescentou (voz com exemplos, tabus, arcos, cadência, comercial) continua no jsonb. Ver [docs/04 § 1.5](04-persona-card-spec.md#15-duas-identidades-a-comportamental-e-a-visual).
+
+---
+
+### 3.38 `wardrobe_items`
+
+**Um figurino reutilizável travado na identidade.** Cada item é uma folha de 4 painéis do **mesmo rosto** com outra roupa — não uma foto de roupa.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `persona_id` | `uuid` → `personas` obrig. | `ON DELETE CASCADE` |
+| `name` | `text` obrig. | |
+| `asset_id` | `uuid` → `media_assets` | A folha gerada. `ON DELETE SET NULL` |
+| `description` | `text` | |
+| `tags` | `text[]` = `{}` | |
+| `sort_order` | `integer` = `0` | Ordem na gaveta do painel |
+| `legacy_id` | `text` | |
+| `created_at` | `timestamptz` | |
+
+Índice: `idx_wardrobe_persona (persona_id, sort_order)`.
+
+**Quando usar / armadilhas.** A distinção "folha do mesmo rosto" × "foto de roupa" é o valor inteiro da tabela: um figurino que não preserva o rosto não serve como referência, porque é justamente como referência que ele vai ser usado. O prompt que os produz (`prompts/guarda_roupa.py`) muda **só** o que foi pedido — `"Change only: …"` — e mantém o layout de 4 painéis e o bloco `IDENTITY LOCK` intactos.
+
+---
+
+### 3.39 `brands`
+
+Marcas e produtos que aparecem no conteúdo. **`persona_id` nulo = catálogo geral**, serve a qualquer persona; preenchido = exclusiva daquela.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. **`NULL` é o catálogo geral** |
+| `name` | `text` obrig. | |
+| `category` / `description` | `text` | |
+| `asset_ids` | `uuid[]` = `{}` | Fotos do produto em ângulos diferentes |
+| `product_sheet_asset_id` | `uuid` → `media_assets` | **A folha de 6 painéis.** É ela que dá consistência quando o produto aparece em qualquer pose — o ativo real da marca |
+| `default_mode` | `text` = `holding`, `CHECK IN ('holding','wearing')` | Como o produto entra na cena: segurado na mão ou vestido no corpo |
+| `active` | `boolean` = `true` | |
+| `metadata` | `jsonb` = `{}` | |
+| `legacy_id` | `text` | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger `trg_brands_touch` |
+
+Índices: `idx_brands_persona (persona_id)` · `idx_brands_catalogo (name) WHERE persona_id IS NULL`.
+
+**Quando usar / armadilhas.**
+- **`default_mode` não é inferível da imagem.** Um boné pode estar na mão ou na cabeça, e a instrução no prompt muda por completo. Por isso é coluna com `CHECK`, e não um palpite do motor.
+- **A folha de 6 painéis é o ativo, não as fotos soltas.** Sem ela, o modelo inventa o que não viu — a cor do lado que a foto não mostra, o logo no ângulo que faltou. Uma marca com `asset_ids` cheio e `product_sheet_asset_id` nulo está cadastrada pela metade.
+- O índice parcial `idx_brands_catalogo` cobre a consulta do catálogo geral, que é a mais frequente na tela de seleção de produto.
+
+---
+
+### 3.40 `generation_jobs`
+
+**A fila de geração de mídia.** O estado vive aqui; a execução é do Celery.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE` |
+| `kind` | `media_kind` = `image` | |
+| `status` | `generation_status` = `queued` | Ver [4.14](#414-generation_status) |
+| `progress` | `integer` = `0` | 0–100 |
+| `provider` / `model` | `text` | |
+| `route` | `text` | `gateway` \| `direct`. **Registrado para atribuir custo** — ver [docs/13 § 2](13-geracao-de-midia.md#2-a-fronteira-gateway--cliente-direto) |
+| `request` | `jsonb` = `{}` | O pedido inteiro. Reproduzir é reenviar isto |
+| `provider_ref` | `text` | Handle do provider em geração assíncrona (fila do fal, predição do Replicate) |
+| `result_asset_ids` | `uuid[]` = `{}` | O que saiu |
+| `error` | `text` | |
+| `attempts` | `integer` = `0` | |
+| `cost_usd` | `numeric(10,6)` = `0` | |
+| `latency_ms` | `integer` | |
+| `created_at` / `started_at` / `finished_at` / `next_poll_at` | `timestamptz` | |
+
+Índices: `idx_genjobs_pendentes (next_poll_at) WHERE status IN ('queued','running')` · `idx_genjobs_persona (persona_id, created_at DESC)`.
+
+**Quando usar / armadilhas.**
+- **`provider_ref` é o que salva crédito já gasto.** Vídeo é assíncrono: o provider devolve um handle e o resultado vem depois. Sem guardar o handle, um restart do worker perde um vídeo já pago.
+- **O motivo de a fila existir é um bug da origem.** Lá, um job síncrono que morresse no meio ficava preso em `running` para sempre e o crédito se perdia. Com Celery, ack tardio e retry, isso desaparece — mas só se `attempts` tiver teto: um modelo que sempre recusa vira loop de gasto.
+- **`cost_usd` é `numeric(10,6)` pelo mesmo motivo de `llm_calls`:** custo de geração não é métrica de infra, é métrica de produto. Vídeo é caro o bastante para decidir se um formato é viável.
+- O índice parcial de pendentes é o que mantém o poller barato com histórico grande — mesma lógica de `tasks.scheduled_for` ([5.1](#51-índices-parciais-o-coração-da-operação)).
+- ❓ **A tabela existe; o worker ainda não.** Nenhum código Python lê ou escreve `generation_jobs` hoje. Quem chama os providers o faz direto, portanto **sem contabilidade de custo**.
+
+---
+
+### 3.41 `video_drafts`
+
+Rascunhos de vídeo: o prompt montado, o diálogo e os parâmetros, guardados antes (ou independentemente) de gerar.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `persona_id` | `uuid` → `personas` obrig. | `ON DELETE CASCADE` |
+| `dialogue` | `text` | A fala, se houver |
+| `prompt` | `text` obrig. | O prompt montado em blocos |
+| `duration_seconds` | `integer` | |
+| `aspect_ratio` / `shot_mode` / `camera` / `vibe` / `voice` / `environment` | `text` | As escolhas do montador |
+| `product_worn` | `boolean` = `false` | Produto vestido × segurado |
+| `notes` | `text` | |
+| `params` | `jsonb` = `{}` | |
+| `created_at` | `timestamptz` | |
+
+Índice: `idx_drafts_persona (persona_id, created_at DESC)`.
+
+**Quando usar / armadilhas.** Na origem, rascunhos viviam dentro de um jsonb de configurações — o que impedia buscar, listar e reaproveitar. Virar tabela é o que torna possível a pergunta "quais rascunhos desta persona ainda não viraram vídeo?". `dialogue` vazio **não** é dado faltando: significa b-roll mudo, e muda o conjunto de humores e o negative prompt ([docs/14 § 7.2](14-motores-de-prompt.md#72-por-que-existem-dois-conjuntos-de-humor)).
+
+---
+
+### 3.42 Remoções e realinhamentos da 0008
+
+**A limpeza prometida na 0007.** Com todo o código lendo de `personas`, as colunas de herança saíram:
+
+```sql
+ALTER TABLE accounts
+    DROP COLUMN IF EXISTS persona_card,
+    DROP COLUMN IF EXISTS persona_version,
+    DROP COLUMN IF EXISTS persona_engine_id,
+    DROP COLUMN IF EXISTS device_binding;
+```
+
+| Coluna removida | Onde ler agora |
+|---|---|
+| `accounts.persona_card` | `personas.persona_card` ([3.32](#332-personas)) |
+| `accounts.persona_version` | `personas.persona_version` |
+| `accounts.persona_engine_id` | não existe mais — a identidade visual são as colunas de [3.37](#337-campos-novos-em-personas-migração-0008) + `media_assets` |
+| `accounts.device_binding` | `account_placements` ([3.35](#335-situação-e-presença-dois-eixos-ortogonais)) |
+
+E `persona_versions` ganhou `persona_id`, com backfill — ver [3.4](#34-persona_versions).
+
+**Por que remover, e por que só agora.** Uma coluna de herança que ainda existe é uma coluna que ainda é lida por engano, e o erro é silencioso: devolve dado desatualizado sem falhar. Removê-la converte um bug silencioso em um erro alto. O prazo foi declarado na [ADR-0013](adr/0013-persona-separada-da-conta.md) e cumprido na migração seguinte — que é o padrão de três passos da [7.5](#75-mudanças-perigosas-o-padrão-em-três-passos) chegando ao terceiro passo.
+
+---
+
 ## 4. ENUMs e máquinas de estado
 
-Catorze ENUMs na migração 0001, mais `node_status` (0002) e quatro de infraestrutura na 0005 ([4.9](#49-service_kind) a [4.12](#412-server_status)). Regra geral: adicionar valor a ENUM em Postgres é barato (`ALTER TYPE ... ADD VALUE`), **remover é caro** (recriar o tipo). Portanto: só entra valor que já tem significado operacional definido.
+Catorze ENUMs na migração 0001, mais `node_status` (0002), quatro de infraestrutura na 0005 ([4.9](#49-service_kind) a [4.12](#412-server_status)) e três de mídia na 0008 ([4.13](#413-media_kind-e-media_role) e [4.14](#414-generation_status)). Regra geral: adicionar valor a ENUM em Postgres é barato (`ALTER TYPE ... ADD VALUE`), **remover é caro** (recriar o tipo). Portanto: só entra valor que já tem significado operacional definido.
 
 ### 4.1 `archetype`
 
@@ -1498,11 +1709,69 @@ A separação `offline` × `unauthorized` não é cosmética: são consertos dif
 
 **É derivado, recalculado ao fim de cada sondagem** — nunca escrito à mão pelo fluxo normal. E é resumo, não diagnóstico: um host `degraded` não diz o que caiu. A resposta está em `server_services.status` + `last_error`, serviço por serviço.
 
+### 4.13 `media_kind` e `media_role`
+
+Os dois ENUMs de [`media_assets`](#336-media_assets) (migração 0008).
+
+**`media_kind`** — o tipo de arquivo:
+
+| Valor | Significado |
+|---|---|
+| `image` | Padrão |
+| `video` | Preenche `duration_seconds` |
+| `audio` | Voz gerada; entra no avatar falante e no lipsync |
+
+**`media_role`** — o **papel** do asset, e é aqui que a consistência facial encosta no schema:
+
+| Valor | Significado | Grupo |
+|---|---|---|
+| `face` | O rosto canônico | **Âncora 1** |
+| `character_sheet` | Turnaround de 4 painéis: roupa e corpo | **Âncora 2** |
+| `close_up_face` | Headshot: textura de pele | **Âncora 3** |
+| `close_up_detail` | Cartela macro: olho, sobrancelha, lábio, mão | **Âncora 4** |
+| `wardrobe` | Figurino travado na identidade | Derivada |
+| `brand_product` | Folha de 6 ângulos de um produto | Derivada |
+| `reference` | Referência extra do mesmo rosto em outro ângulo | Derivada |
+| `generated` | Conteúdo produzido (o padrão) | Derivada |
+| `inspiration` | Material de referência externo | Derivada |
+
+**As quatro primeiras nunca podem sumir, e a ordem entre elas é contrato.** Não há transição: um asset não muda de papel — se o papel muda, é outro asset. E `media_role` **não é** hierarquia de qualidade: `generated` não é "pior" que `face`, é outra coisa. O que separa os dois grupos é se o asset **entra no array de referências de outra geração** ou se é o produto final dela.
+
+### 4.14 `generation_status`
+
+Estados de [`generation_jobs`](#340-generation_jobs) (migração 0008).
+
+```
+   ┌────────┐  worker pega   ┌─────────┐  provider responde  ┌──────┐
+   │ queued │───────────────▶│ running │────────────────────▶│ done │
+   └───┬────┘                └────┬────┘                     └──────┘
+       │                          │
+       │                          ├──── falha ───▶ ┌───────┐ ── retry ──┐
+       │                          │                │ error │            │
+       │                          │                └───────┘ ◄──────────┘
+       │                          │                          (attempts < teto)
+       └──────── humano ──────────┴───▶ ┌───────────┐
+                                        │ cancelled │
+                                        └───────────┘
+```
+
+| Valor | Significado |
+|---|---|
+| `queued` | Enfileirado, nenhum worker pegou ainda |
+| `running` | Worker executando, ou aguardando o provider numa fila assíncrona |
+| `done` | Terminou; `result_asset_ids` preenchido |
+| `error` | Falhou; `error` preenchido, `attempts` incrementado |
+| `cancelled` | Cancelado do **nosso** lado |
+
+> ⚠️ **`cancelled` é intenção nossa, não cancelamento no provider.** O job continua rodando no fal e o crédito é gasto igual. Cancelar é parar de esperar, não parar de pagar — e a interface precisa dizer isso, senão o operador cancela achando que economizou.
+
+`running` cobre dois estados fisicamente diferentes (ocupando um worker × só esperando o provider). Colapsá-los foi escolha da origem, preservada. A distinção prática é `provider_ref`: preenchido significa "está com eles".
+
 ---
 
 ## 5. Índices
 
-Vinte e sete índices na migração 0001, mais os de infraestrutura (0005/0006) e os de identidade e busca em massa da 0007 ([5.5](#55-índices-da-identidade-e-da-busca-em-massa-migração-0007)). Muitos são **parciais** (`WHERE ...`): indexam só a fatia quente da tabela. O ganho é duplo — índice menor (cabe em cache) e escrita mais barata (linha que não bate no predicado não entra no índice). É a técnica certa para tabelas onde 99% das linhas estão em estado terminal e as consultas só olham o 1% ativo.
+Vinte e sete índices na migração 0001, mais os de infraestrutura (0005/0006), os de identidade e busca em massa da 0007 ([5.5](#55-índices-da-identidade-e-da-busca-em-massa-migração-0007)) e os de mídia e geração da 0008 ([5.6](#56-índices-da-mídia-e-da-geração-migração-0008)). Muitos são **parciais** (`WHERE ...`): indexam só a fatia quente da tabela. O ganho é duplo — índice menor (cabe em cache) e escrita mais barata (linha que não bate no predicado não entra no índice). É a técnica certa para tabelas onde 99% das linhas estão em estado terminal e as consultas só olham o 1% ativo.
 
 ### 5.1 Índices parciais (o coração da operação)
 
@@ -1585,6 +1854,24 @@ Todos existem por causa da escala: a operação real tem **milhares** de logins,
 **Por que trigrama e não `LIKE 'prefixo%'`.** Índice B-tree serve busca por prefixo; o operador não digita prefixo, digita pedaço — lembra "luna" de `@lunaprado.oficial`. `pg_trgm` é a extensão já habilitada para dedup e QA de caption, então o custo marginal é um índice, não uma dependência nova.
 
 **As facetas não têm índice próprio, e é de propósito.** As contagens por plataforma, situação, papel, arquétipo e presença varrem `accounts` inteira — mas em **uma única consulta** com todas as agregações, em vez de seis idas ao banco. Índice de contagem só ajudaria com `count` por coluna isolada; o gargalo, se aparecer, é a passada única e se resolve com cache curto.
+
+### 5.6 Índices da mídia e da geração (migração 0008)
+
+| Índice | Definição | Consulta que serve |
+|---|---|---|
+| `idx_media_persona` | `(persona_id, created_at DESC)` | A galeria da ficha da persona — o conteúdo produzido, mais recente primeiro |
+| `idx_media_role` | `(persona_id, role)` | As quatro âncoras de identidade, e os figurinos de uma persona |
+| `idx_media_kind` | `(kind, created_at DESC)` | Biblioteca global filtrada por tipo |
+| `idx_media_hash` | **UNIQUE** `(content_hash) WHERE content_hash IS NOT NULL` | **Dedupe.** O parcial é o que permite reexecutar o importador sem conflito em linhas sem hash |
+| `idx_personas_niches` | gin em `(niches)` | "Quais personas atendem este nicho?" — seleção para campanha e para o pool de cenas |
+| `idx_wardrobe_persona` | `(persona_id, sort_order)` | A gaveta de figurinos, na ordem que o operador definiu |
+| `idx_brands_persona` | `(persona_id)` | Marcas exclusivas de uma persona |
+| `idx_brands_catalogo` | `(name) WHERE persona_id IS NULL` | **O catálogo geral** — a consulta mais frequente da tela de produto |
+| `idx_genjobs_pendentes` | `(next_poll_at) WHERE status IN ('queued','running')` | O poller da fila. Parcial pela mesma razão de `idx_tasks_due`: o histórico terminal não entra |
+| `idx_genjobs_persona` | `(persona_id, created_at DESC)` | Histórico de geração de uma personagem |
+| `idx_drafts_persona` | `(persona_id, created_at DESC)` | Rascunhos de vídeo pendentes |
+
+**Dois índices parciais carregam o peso.** `idx_media_hash` transforma dedupe em restrição de banco, não em disciplina de código — o mesmo arquivo simplesmente não entra duas vezes, e o importador é idempotente de graça. `idx_genjobs_pendentes` mantém o poller barato indefinidamente: um ano de jobs `done` não torna a varredura mais lenta em nada.
 
 ---
 
@@ -2050,9 +2337,13 @@ Casos específicos deste schema:
 - [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade do núcleo
 - [`db/migrations/0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) · [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) — infraestrutura e inventário ([3.26](#326-infraestrutura-um-servidor-vários-serviços))
 - [`db/migrations/0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) — personas, papéis, observações e presença ([3.32](#332-personas) a [3.35](#335-situação-e-presença-dois-eixos-ortogonais))
+- [`db/migrations/0008_absorve_maquina_de_influencers.sql`](../db/migrations/0008_absorve_maquina_de_influencers.sql) — mídia, identidade visual, guarda-roupa, marcas e fila de geração ([3.36](#336-media_assets) a [3.42](#342-remoções-e-realinhamentos-da-0008))
 - [ADR-0001](adr/0001-core-proprio.md) — por que core próprio; por que o modelo de dados é nosso
 - [ADR-0012](adr/0012-servidor-com-varios-servicos.md) — por que servidor e serviço são tabelas diferentes
 - [ADR-0013](adr/0013-persona-separada-da-conta.md) — por que a identidade, o login e o lugar onde ele roda são três coisas
+- [ADR-0014](adr/0014-absorver-a-maquina-de-influencers.md) — por que a máquina de influencers deixou de existir e a identidade visual virou coluna
+- [docs/13 — Geração de mídia](13-geracao-de-midia.md) — o subsistema que escreve em `media_assets` e `generation_jobs`
+- [docs/14 — Motores de prompt](14-motores-de-prompt.md) — quais colunas de `personas` o motor lê a cada geração
 - [docs/contratos/android-manager.md](contratos/android-manager.md) — o serviço que alimenta `devices`
 - [docs/04 — Persona Card](04-persona-card-spec.md) — o schema de `personas.persona_card`
 - [docs/05 — Loop do agente](05-loop-do-agente.md) — quem escreve em qual tabela, em qual passo
