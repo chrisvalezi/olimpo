@@ -11,10 +11,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl build-essential libpq-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# O layout src exige que src/ exista antes do install editável — o
+# setuptools resolve os pacotes no momento da instalação, não depois.
 COPY pyproject.toml ./
+COPY src/ ./src/
 RUN pip install --upgrade pip && pip install -e ".[dev]"
 
-COPY src/ ./src/
 COPY db/ ./db/
 
 RUN useradd -m -u 1000 olimpo && chown -R olimpo:olimpo /app

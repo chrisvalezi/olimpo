@@ -9,6 +9,9 @@ help: ## Mostra esta ajuda
 
 check-env: ## Verifica se o .env existe
 	@test -f .env || (echo "❌ .env não encontrado. Rode: cp .env.example .env" && exit 1)
+	@# O container roda como uid 1000; o diretório montado precisa ser dele,
+	@# senão o modo dry-run não consegue gravar o que teria sido publicado.
+	@mkdir -p dryrun && chown -R 1000:1000 dryrun 2>/dev/null || true
 
 up: check-env ## Sobe a stack principal
 	$(COMPOSE) up -d --build

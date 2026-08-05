@@ -25,6 +25,11 @@ x-python-common: &python-common
     - ./src:/app/src
     - ./db:/app/db
     - media:/app/media
+    - ./dryrun:/app/dryrun
+  # Os serviços externos (orchestrator, máquina de influencers, android-manager)
+  # rodam no host, não nesta rede. Sem isto o host.docker.internal nem resolve.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   depends_on:
     postgres: {condition: service_healthy}
     redis:    {condition: service_healthy}
@@ -82,7 +87,9 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:4000/health/liveliness"]
+      # A imagem do LiteLLM não traz curl — usa o Python que já vem nela.
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')"]
       interval: 15s
       timeout: 5s
       retries: 5

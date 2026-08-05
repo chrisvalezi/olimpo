@@ -114,14 +114,10 @@ CREATE TYPE source_kind AS ENUM (
 );
 
 -- =============================================================================
--- CONTROLE DE MIGRAÇÃO
+-- Nota: a tabela `schema_migrations` NÃO é criada aqui. Ela é do runner
+-- (olimpo.db.migrate), que a cria no bootstrap antes de aplicar qualquer
+-- migração — declarar aqui também faria a primeira migração falhar.
 -- =============================================================================
-
-CREATE TABLE schema_migrations (
-    version     text PRIMARY KEY,
-    applied_at  timestamptz NOT NULL DEFAULT now(),
-    checksum    text NOT NULL
-);
 
 -- =============================================================================
 -- TENANTS / CLIENTES  [DORMENTE até a Fase 5 — clipagem como serviço]
