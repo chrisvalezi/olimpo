@@ -147,7 +147,25 @@ O fallback (`@image` sem número) vira `"the reference image"`, no singular — 
 
 > ⚠️ **Referências extras entram no FIM do array.** `personas.reference_asset_ids` (fotos do mesmo rosto em outros ângulos) são concatenadas depois das quatro âncoras. Colocá-las antes deslocaria as posições e invalidaria todas as tags do prompt de uma vez.
 
-### 3.3 Consequência para quem mexe no código
+### 3.3 Papel declarado por posição
+
+Quando as referências têm papéis **heterogêneos** — identidade, layout, peça de roupa —, a ordem sozinha não basta: o prompt precisa dizer o que é cada uma. `prompts/referencias.py::montar_instrucao_posicional()` monta esse texto a partir da lista de papéis, **na mesma ordem** do array enviado.
+
+```
+REFERENCE IMAGES — The first reference image is the identity reference — replicate this
+exact person… The second reference image is the layout reference — reproduce its panel
+arrangement… Do NOT copy its clothing. The third and fourth reference images are garment
+references — reproduce these exact clothing items…
+```
+
+Era uma lacuna real: os prompts de âncora derivada e de figurino diziam *"the reference image"* no singular enquanto o código já mandava três. O modelo não tinha como saber que a terceira imagem era uma blusa e não uma pessoa — e a blusa influenciava o rosto.
+
+Dois cuidados que o teste cobre:
+
+- **Ordinal casa com posição.** Descrever a segunda imagem enquanto se envia outra na segunda posição é pior que não descrever nada: o modelo segue o texto. Papel desconhecido é omitido do texto, mas **não** renumera os seguintes — a imagem continua sendo enviada.
+- **Concordância é instrução, não estilo.** `"use it to confirm"` com três imagens manda usar uma só, e o modelo obedece. Singular e plural estão escritos separadamente, não derivados por substituição.
+
+### 3.4 Consequência para quem mexe no código
 
 - Toda mudança em `ORDEM_REFERENCIAS`, em `limpar_prompt` ou nos textos de trava é **mudança de comportamento do produto**, não refatoração.
 - `media_assets.reference_ids` é `uuid[]` e guarda as referências **na ordem em que foram usadas**. Gravar embaralhado inutiliza o registro para reprodução.
@@ -377,6 +395,21 @@ Confiar no banco sem checar permitiria que uma linha adulterada lesse qualquer a
 - **`posicao` é o que o prompt referencia como `@imageN`.** É por isso que ela é explícita no payload e não implícita na ordem do array.
 - **`completas` importa mais do que *quais*.** Com as quatro, o rosto se mantém entre gerações. Faltando a primeira, não há de onde ancorar — e é isso que `pode_gerar_com_identidade` responde.
 - `extras` são as referências adicionais (`personas.reference_asset_ids`), que entram **depois** das quatro.
+
+#### Quem manda o quê
+
+Nem toda geração envia as mesmas imagens, e a diferença é intencional:
+
+| Geração | Referências enviadas |
+|---|---|
+| Propor rosto | só as fotos passadas no modal, com papel declarado (`face`/`style`/`extra`) |
+| Âncoras derivadas | rosto + **acervo de referência** da persona |
+| Figurino | rosto + folha de personagem (layout) + fotos de peças |
+| Estúdio de fotos | rosto + roupa + os dois closes + produto + acervo |
+
+O rosto **não** recebe o acervo: ele é o que ainda não existe quando se propõe um rosto, e as fotos do acervo são justamente as que o operador escolhe no modal.
+
+Teto de **10 imagens** por geração ([`MAXIMO_REFERENCIAS`](../src/olimpo/media/identidade.py)). Não é economia: `limpar_prompt` só traduz `@imageN` até a décima posição, a instrução posicional só sabe nomear até `tenth`, e o peso de cada referência cai conforme o número sobe — vinte fotos diluem o rosto em vez de reforçá-lo. Quando corta, registra em log e grava `referencias_cortadas` no asset.
 
 ### 8.2 O catálogo de motores
 

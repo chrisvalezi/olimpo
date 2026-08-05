@@ -29,8 +29,9 @@ from __future__ import annotations
 from .tipos import Referencia
 
 __all__ = [
-    "montar_instrucao_de_referencias",
     "montar_instrucao_a_partir_de_referencias",
+    "montar_instrucao_de_referencias",
+    "montar_instrucao_posicional",
 ]
 
 
@@ -190,3 +191,108 @@ def montar_instrucao_a_partir_de_referencias(
         style_ref_note=style_ref_note,
         extra_count=extras,
     )
+
+
+# =============================================================================
+# Instrução posicional — quando cada imagem tem um papel diferente
+# =============================================================================
+# `montar_instrucao_de_referencias` cobre o caso de CRIAR um rosto: uma
+# referência facial, uma de estilo, e ângulos extras da mesma pessoa.
+#
+# As âncoras derivadas e o figurino são outro caso. Ali as imagens têm papéis
+# heterogêneos — identidade, layout, peça de roupa —, e o prompt dizia "the
+# reference image" no singular enquanto o código mandava três. Com linguagem
+# singular o modelo não tem como saber que a terceira imagem é uma blusa e
+# não uma pessoa, e o resultado é a blusa influenciando o rosto.
+
+#: Escrito por extenso porque o texto vai direto para o modelo. Os provedores
+#: não entendem `@image3`; entendem "the third reference image".
+_ORDINAIS = (
+    "first", "second", "third", "fourth", "fifth",
+    "sixth", "seventh", "eighth", "ninth", "tenth",
+)
+
+#: Singular e plural escritos separadamente, não derivados por substituição.
+#: Concordância errada num prompt não é detalhe de estilo: "use IT to confirm"
+#: quando são três imagens diz ao modelo para usar uma só, e ele obedece.
+_INSTRUCAO_POR_PAPEL: dict[str, tuple[str, str]] = {
+    "identity": (
+        "the identity reference — replicate this exact person: facial bone "
+        "structure, eye shape and colour, nose, lips, skin tone and texture, "
+        "hairline. This face is the subject's identity and must not drift",
+        "identity references — replicate this exact person: facial bone "
+        "structure, eye shape and colour, nose, lips, skin tone and texture, "
+        "hairline. This face is the subject's identity and must not drift",
+    ),
+    "layout": (
+        "the layout reference — reproduce its panel arrangement, framing and "
+        "body proportions. Do NOT copy its clothing",
+        "layout references — reproduce their panel arrangement, framing and "
+        "body proportions. Do NOT copy their clothing",
+    ),
+    "outfit": (
+        "the current-outfit reference — the clothing the subject is wearing",
+        "current-outfit references — the clothing the subject is wearing",
+    ),
+    "garment": (
+        "a garment reference — reproduce this exact clothing item on the "
+        "subject. Copy ONLY the garment: ignore the face, body and background "
+        "of whoever is shown wearing it",
+        "garment references — reproduce these exact clothing items on the "
+        "subject. Copy ONLY the garments: ignore the face, body and background "
+        "of whoever is shown wearing them",
+    ),
+    "product": (
+        "a product reference — reproduce this exact object. Ignore any person "
+        "shown holding it",
+        "product references — reproduce these exact objects. Ignore any person "
+        "shown holding them",
+    ),
+    "extra": (
+        "the SAME person photographed from another angle or in different "
+        "lighting — use it to confirm bone structure and body proportions. It "
+        "is the same individual, never a different person",
+        "the SAME person photographed from other angles or in different "
+        "lighting — use them to confirm bone structure and body proportions. "
+        "They are the same individual, never different people",
+    ),
+}
+
+
+def montar_instrucao_posicional(papeis: list[str]) -> str:
+    """Diz, por posição, o que o modelo deve fazer com cada imagem.
+
+    `papeis` vem NA MESMA ORDEM do array de referências enviado ao provider.
+    Descrever a segunda imagem enquanto se envia outra na segunda posição é
+    pior que não descrever nada: o modelo segue o texto.
+
+    Papéis repetidos são agrupados ("The third and fourth are garment
+    references"), porque enumerar cinco vezes a mesma frase dilui o resto do
+    prompt — e prompt longo demais faz o modelo ignorar o começo.
+    """
+    if not papeis:
+        return ""
+
+    # Agrupa posições consecutivas de mesmo papel.
+    grupos: list[tuple[str, list[int]]] = []
+    for indice, papel in enumerate(papeis):
+        if grupos and grupos[-1][0] == papel:
+            grupos[-1][1].append(indice)
+        else:
+            grupos.append((papel, [indice]))
+
+    partes: list[str] = []
+    for papel, posicoes in grupos:
+        formas = _INSTRUCAO_POR_PAPEL.get(papel)
+        if not formas:
+            continue
+        nomes = [
+            _ORDINAIS[i] if i < len(_ORDINAIS) else f"{i + 1}th" for i in posicoes
+        ]
+        if len(nomes) == 1:
+            partes.append(f"The {nomes[0]} reference image is {formas[0]}.")
+        else:
+            lista = ", ".join(nomes[:-1]) + f" and {nomes[-1]}"
+            partes.append(f"The {lista} reference images are {formas[1]}.")
+
+    return " REFERENCE IMAGES — " + " ".join(partes)

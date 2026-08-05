@@ -20,7 +20,11 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 **HEIC/HEIF no upload** — foto de iPhone é convertida para JPEG na entrada, com a orientação EXIF aplicada. Nenhum provider aceita HEIC, então guardá-lo cru faria a falha aparecer na geração, meses depois. Feito no servidor e não no navegador como na origem: o upload é o funil único de todos os caminhos.
 
+**As âncoras derivadas passam a usar o acervo de referência** — folha de personagem e closes recebiam só o rosto. As fotos do acervo são a mesma pessoa em outros ângulos e, sobretudo, de corpo inteiro: é o que faltava para a folha de personagem parar de inventar altura e proporção a partir de um retrato. Teto de 10 imagens por geração, com o corte registrado no asset.
+
 ### Corrigido
+
+**Prompt no singular com várias referências** — os prompts de âncora derivada e de figurino diziam "the reference image" enquanto o código já mandava três. O modelo não tinha como saber que a terceira imagem era uma peça de roupa e não uma pessoa. Agora `montar_instrucao_posicional()` declara o papel de cada uma por posição, com singular e plural escritos separadamente — `"use it to confirm"` com três imagens manda o modelo usar uma só.
 
 **O upload confiava no `content-type` do cliente** — nas duas direções. Um `.webp` enviado por `curl` era recusado (`application/octet-stream`), e um PDF renomeado para `.jpg` era **aceito**, porque o cliente anunciava `image/jpeg` e o tipo estava na lista. Agora quem decide são os bytes, e não reconhecer é recusa — não motivo para voltar a acreditar no cliente.
 
