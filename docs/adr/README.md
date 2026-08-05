@@ -16,6 +16,8 @@ Um ADR aceito não é imutável: é substituído por outro ADR, nunca editado pa
 | [0008](0008-recon-antes-da-campanha.md) | Recon obrigatório antes de planejar campanha | Aceito | Campanha de engajamento passa por `recon_pending → recon_done`: uma conta Android abre o alvo e uma LLM multimodal avalia antes de qualquer comentário. |
 | [0009](0009-niveis-de-autonomia.md) | Autonomia em quatro níveis, por conta | Aceito | L0–L3 com promoção por histórico e rebaixamento automático; guardrails que nunca desligam; `gossip` tem teto em L2 porque difamação é processo, não shadowban. |
 | [0010](0010-llm-gateway-litellm.md) | LiteLLM como gateway único de LLM | Aceito | Todo tráfego de LLM passa pelo gateway: balanceamento entre os 2 Mac minis, fallback, troca de modelo por configuração e roteamento por propósito com teto de gasto. |
+| [0011](0011-polling-e-registro-de-nos.md) | Polling e registro de nós do orchestrator | Aceito | Não existe webhook no orchestrator e cada instância só controla o próprio host: a verificação é por polling, a lista de nós é nossa e a chave de task externa é o par `(node_id, external_task_id)`. |
+| [0012](0012-servidor-com-varios-servicos.md) | Um servidor roda vários serviços | Aceito | O modelo deixa de ser "nó = orchestrator": `servers → server_services`, com credencial, TLS e saúde por serviço, e `devices` vira tabela de verdade para sustentar a transmissão de tela. |
 
 ---
 

@@ -89,10 +89,14 @@ class BaseClient:
         *,
         timeout: float = 30.0,
         dry_run: bool | None = None,
+        verify_tls: bool = True,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.timeout = timeout
+        # Certificado autoassinado é a regra em rede interna. Desligar a
+        # verificação é decisão POR SERVIÇO — nunca um default global.
+        self.verify_tls = verify_tls
         # O dry-run global vem de DISPATCH_ENABLED; um cliente pode forçar.
         self.dry_run = (not settings.dispatch_enabled) if dry_run is None else dry_run
         self.breaker = CircuitBreaker()
@@ -133,7 +137,7 @@ class BaseClient:
     async def _raw_request(
         self, method: str, path: str, payload: Any, headers: dict[str, str]
     ) -> dict[str, Any]:
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
+        async with httpx.AsyncClient(timeout=self.timeout, verify=self.verify_tls) as client:
             response = await client.request(
                 method, f"{self.base_url}{path}", json=payload, headers=headers
             )

@@ -105,6 +105,9 @@ panel/
     │   │   ├── page.tsx            # (6) biblioteca
     │   │   └── [id]/page.tsx
     │   ├── interacoes/page.tsx     # (7)
+    │   ├── servidores/
+    │   │   ├── page.tsx            # (10) hosts, serviços, contas descobertas
+    │   │   └── [id]/page.tsx       # devices do host + telas ao vivo
     │   ├── observabilidade/
     │   │   ├── page.tsx            # (8) tasks + filas
     │   │   ├── llm/page.tsx
@@ -132,7 +135,7 @@ panel/
 
 ## 4. Mapa de telas
 
-Convenção das tabelas abaixo: **endpoint** é o contrato da FastAPI; **tabelas** são as do `db/migrations/0001_initial.sql`.
+Convenção das tabelas abaixo: **endpoint** é o contrato da FastAPI; **tabelas** são as de `db/migrations/` — `0001_initial.sql` para o núcleo e `0005_servers_and_services.sql` / `0006_account_inventory.sql` para a tela de Servidores (§4.10).
 
 ---
 
@@ -503,6 +506,85 @@ Toda mudança aqui emite um evento em `events` com o autor. Não existe alteraç
 
 ---
 
+### 4.10 Servidores
+
+`/servidores` — o índice que nenhum serviço tem.
+
+**Propósito.** Um servidor é um **host**; nele rodam vários serviços — o orchestrator que executa, o android-manager que gerencia a frota, o gateway que transmite as telas. Nenhum deles conhece os outros, e nenhum conhece a frota inteira ([ADR-0012](adr/0012-servidor-com-varios-servicos.md)). Esta tela responde: quais hosts existem, o que roda em cada um, o que está no ar, quantos devices estão vivos e **quais contas estão logadas lá que o Olimpo ainda não conhece**.
+
+#### Lista — `/servidores`
+
+Um cartão por servidor. Recarrega sozinho a cada 20 s.
+
+```
+┌─ i9-14900k                                    [ativo]  [gpu]  ──────────┐
+│  host i9-14900k.taila41397.ts.net   tailscale 100.x.x.x                  │
+│                                        [ sondar ] [ varredura completa ] │
+├──────────────────────────────────────────────────────────────────────────┤
+│  serviços 3/3      devices 6/8      contas online 11   sincronia há 2min  │
+├─ Serviços ───────────────────────────────────────────────────────────────┤
+│  [Orchestrator]     http://…:8078        41ms   no ar              ↗      │
+│  [Android Manager]  https://…/api    🔓  88ms   no ar              ↗      │
+│  [Gateway de tela]  https://…:9000       —      não sondado        ↗      │
+├──────────────────────────────────────────────────────────────────────────┤
+│  ⚠ 3 contas logadas que o Olimpo não conhece      [ importar todas ]      │
+├──────────────────────────────────────────────────────────────────────────┤
+│  📱 ver os 8 devices ›                                                    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+| Elemento | O que mostra | Endpoint / tabelas |
+|---|---|---|
+| Cabeçalho | nome, `server_status`, `labels`, e os **três endereços** (`hostname`, `tailscale_ip`, `lan_ip`) em fonte monoespaçada | `GET /v1/servers` → `servers` |
+| Métricas | serviços online/total · devices vivos/total · contas logadas · idade da última sincronia com contas encontradas e duração | `server_services`, `devices`, `account_placements`, `inventory_syncs` (a mais recente) |
+| Linha de serviço | tipo com cor própria, `label`, `base_url`, **badge de TLS**, latência, status com `last_error` no tooltip, **link ↗ para a interface** e remoção | `server_services` |
+| Contas descobertas | contas logadas nos devices que **não existem** em `accounts`, com plataforma, seguidores e em quais containers aparecem | `GET /v1/servers/{id}/discovered` |
+| Rodapé | link para o detalhe do servidor; erro da última sincronia quando houver | `GET /v1/servers/{id}/devices` |
+
+**Badge de TLS.** Todo serviço `https://` mostra um cadeado: **fechado verde** quando `verify_tls = true`, **aberto âmbar** quando não. Certificado autoassinado é a regra em rede interna e desligar a verificação é uma decisão legítima — mas é **por serviço** e precisa ficar visível, não escondida no banco. Serviço em `http://` não mostra cadeado nenhum: não há o que afirmar.
+
+**Sondagem é por serviço, não por host.** `sondar` bate em todos os serviços habilitados **em paralelo** e cada um responde por si — um android-manager sem credencial não derruba a leitura do orchestrator do mesmo servidor. O status do host é derivado do pior dos serviços, e o cartão sempre mostra os dois níveis. `varredura completa` (`?refresh=true`) força o nó a revisitar cada device: custa cerca de 90 s e por isso **nunca** é o comportamento padrão — é um segundo botão, com aviso no `title`.
+
+**Estado `credencial inválida` tem cor própria.** `401`/`403` não são "fora do ar": o operador conserta credencial, não infraestrutura. Confundir os dois faz reiniciar serviço saudável.
+
+**Contas descobertas.** A varredura do orchestrator encontra contas logadas nos devices que o Olimpo não tem cadastradas. A faixa âmbar oferece importar (todas ou selecionadas). Contas importadas nascem em `draft`/`L0`, já vinculadas ao device e com o inventário real (`external_id`, seguidores, seguindo, publicações, `jid`) — **existem e não agem** até alguém escrever a persona e ativá-las.
+
+**Cadastro.** `Novo servidor` pede nome e endereços; `+ serviço` pede tipo, URL, credencial e TLS, com **sugestões por tipo** (porta, esquema, caminho de saúde, dica). Duas travas: a API recusa orchestrator apontando para `:8077` (é o executor — quem fala com ele tem root no host), e o formulário avisa que o android-manager **não tem chave de API**, só usuário e senha.
+
+`GET|POST /v1/servers` · `PATCH|DELETE /v1/servers/{id}` · `POST /v1/servers/{id}/services` · `PATCH|DELETE /v1/servers/services/{id}` · `POST /v1/servers/{id}/probe[?refresh=true]` · `GET /v1/servers/{id}/discovered` · `POST /v1/servers/{id}/import`
+
+#### Detalhe do servidor — `/servidores/[id]`
+
+Os devices daquele host, em grade de cartões, e o lugar onde o monitoramento de tela vai morar.
+
+| Elemento | Conteúdo |
+|---|---|
+| Cartão de device | `container`, versão do Android, `adb_target`, `video_device`, vivo/parado, idade de `last_seen_at` |
+| Contas no device | handle, plataforma, `android_user`, e o marcador de **usuário ativo** |
+| Aviso de vigilância | faixa âmbar quando `under_external_management` — o watchdog do android-manager pode reiniciar este container |
+| Ações por device | `captura` (desabilitada até haver android-manager cadastrado no servidor) · `tela` (desabilitada sem gateway ou sem dispositivo de vídeo) |
+| `grade ao vivo` | todas as telas aptas lado a lado, com **teto explícito** de telas simultâneas |
+
+> ⚠️ **"usuário ativo" não é "está na tela".** O serviço reporta *usuário Android em execução*, e o Android mantém vários rodando ao mesmo tempo. Qual está em primeiro plano ninguém sabe. O rótulo diz o que o dado significa, não o que gostaríamos que significasse ([docs/02 § 3.31](02-modelo-de-dados.md#331-campos-novos-em-accounts-e-account_placements)).
+
+**Monitoramento de tela está desligado hoje, e a tela explica por quê.** A base já está montada — device com endereço ADB e dispositivo de vídeo, gateway cadastrável como serviço, link montado pela interface — mas o gateway ainda não existe do lado de lá. Em vez de esconder o recurso, a tela mostra o estado real:
+
+| Situação | O que aparece |
+|---|---|
+| Nenhum gateway cadastrado no servidor | Faixa neutra: *"Transmissão de tela não configurada. A interface já está pronta; falta o endereço."* |
+| Gateway cadastrado, nenhum device apto | Faixa âmbar explicando que a transmissão contínua exige dispositivo de vídeo no container — sem ele só existe o modo que derruba quem já estava assistindo |
+| Gateway + devices aptos | Botão `grade ao vivo` habilitado |
+
+Três regras que valem para **qualquer transporte** (hoje WebSocket + H.264; WebRTC está por vir, e por isso o gateway é modelado como serviço opaco com URL própria):
+
+1. **O painel precisa estar em HTTPS.** Página segura não embute origem insegura, e a decodificação de vídeo exige contexto seguro.
+2. **O espectador é sempre passivo.** O parâmetro que garante isso **no servidor** é obrigatório na montagem do link — o Olimpo nunca pode roubar o controle de um curador humano operando o device. A tela diz isso em texto, acima da grade.
+3. **Teto de telas simultâneas.** Cada tela aberta é um processo de codificação no host; sem teto, abrir a grade derruba o servidor que se queria observar.
+
+`GET /v1/servers/{id}/devices` → `devices` + `account_placements` + o `screen_gateway` do servidor (ou `null`, que é o que desabilita os botões).
+
+---
+
 ## 5. Componentes reutilizáveis
 
 Todos em `panel/src/components/domain/`. Nenhum faz fetch.
@@ -666,7 +748,7 @@ Regras que valem para as três:
 |---|---|
 | **Não é um editor de posts.** Não existe "criar post do zero" | Quem cria conteúdo é o agente. Se o humano está escrevendo caption, o loop falhou — corrija o Persona Card ou o prompt, não o post. A exceção é "editar e aprovar", que edita algo que a máquina propôs |
 | **Não é um cliente de Instagram.** Sem feed navegável, sem responder DM de graça, sem explorar perfis | O painel opera o Olimpo, não a plataforma. Quem toca a plataforma é o android-orchestrator |
-| **Não replica o android-manager.** Nada de gerenciar containers redroid, fazer login de conta ou curar device | Saúde da frota é exibida somente leitura. Infra é responsabilidade de outro painel |
+| **Não replica o android-manager.** Nada de gerenciar containers redroid, fazer login de conta ou curar device | Saúde da frota é exibida somente leitura, e a tela de Servidores (§4.10) **linka** para o painel de cada serviço em vez de reimplementá-lo. Infra é responsabilidade de outro painel — a garantia técnica é a allowlist do cliente ([contrato](contratos/android-manager.md)) |
 | **Não vira Grafana.** Sem construtor de dashboard, sem série temporal de infra | `make up-obs` já entrega isso. Aqui só entra métrica ligada a decisão |
 | **Sem escrita direta no banco.** Nenhuma tela edita `events`, `memories`, `tasks.status` ou `llm_calls` à mão | Auditoria imutável é premissa. Corrigir estado é ação de API com efeito colateral registrado, não `UPDATE` |
 | **Sem automação escondida na UI.** Nenhuma regra de negócio implementada só no front | Se o painel decide algo, o worker não decide igual. Toda lógica no backend; o painel apresenta e comanda |
@@ -700,7 +782,7 @@ Regras que valem para as três:
 | Fase | O que o painel ganha |
 |---|---|
 | **0** | Página única read-only: contas, tasks, últimos 100 `events`. Sem ações. Prova o encanamento |
-| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE |
+| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas |
 | **2** | Tela de interações · promoção de autonomia com confirmação dupla · aba de amostragem L2 · métricas de post na ficha |
 | **3** | Campanhas inteiras: wizard, `SpreadPolicyEditor`, `ReconViewer`, revisão de plano, timeline de execução · biblioteca de conteúdo |
 | **4** | Monitores 24/7 · fila de revisão dedicada a fofoca com `claim_status` obrigatório e lote proibido |
@@ -719,4 +801,6 @@ Regras que valem para as três:
 - `docs/07-monitores.md` — regras de disparo e saúde
 - `docs/08-guardrails-e-autonomia.md` — o que cada nível permite e o que a fila precisa bloquear
 - `docs/11-observabilidade.md` — métricas, `events` e `trace_id`
+- `docs/adr/0012-servidor-com-varios-servicos.md` — o modelo por trás da tela de Servidores
+- `docs/contratos/android-manager.md` — o que a frota expõe, e o que ela **não** expõe
 - `db/migrations/0001_initial.sql` — fonte da verdade do schema

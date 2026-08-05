@@ -8,7 +8,7 @@ Este diretório documenta **o contrato que o Olimpo assume** de cada serviço. T
 |---|---|---|---|---|
 | [android-orchestrator.md](android-orchestrator.md) | android-orchestrator | ✅ existe — **contrato a confirmar** | Executa e **verifica** toda ação em device real (IG, WhatsApp) | `ORCHESTRATOR_*` |
 | [maquina-de-influencers.md](maquina-de-influencers.md) | máquina de influencers | ✅ existe (em dev) — **contrato a confirmar** | Persona, história, geração de foto/vídeo, brands | `PERSONA_ENGINE_*` |
-| [android-manager.md](android-manager.md) | android-manager | ✅ existe — **contrato a confirmar** | Frota redroid. Olimpo usa **somente leitura** | `ANDROID_MANAGER_*` |
+| [android-manager.md](android-manager.md) | android-manager | ✅ existe — **contrato VALIDADO em 2026-08-05** | Frota redroid. Olimpo usa **somente leitura**, garantida por allowlist nossa | nenhuma: uma linha de `server_services` por instância |
 | [media-forge.md](media-forge.md) | media-forge | ❌ **não existe** — este doc é a **especificação** | Corte/edição de vídeo (Fase 5) | `MEDIA_FORGE_*` |
 
 > ⚠️ **Leia isto antes de implementar qualquer cliente.**

@@ -1,7 +1,7 @@
 # 02 — Modelo de dados
 
-> Fonte da verdade: [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql).
-> Este documento **descreve** aquele arquivo. Se os dois divergirem, o SQL vence e este documento está com bug.
+> Fonte da verdade: os arquivos em [`db/migrations/`](../db/migrations/) — [`0001_initial.sql`](../db/migrations/0001_initial.sql) para o núcleo, [`0002_orchestrator_nodes.sql`](../db/migrations/0002_orchestrator_nodes.sql) para a ligação com o orchestrator, [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) para servidores, serviços, devices e inventário de contas.
+> Este documento **descreve** aqueles arquivos. Se os dois divergirem, o SQL vence e este documento está com bug.
 
 Postgres 16 + três extensões: `uuid-ossp` (chaves), `vector` (pgvector, memória semântica), `pg_trgm` (busca aproximada em texto — dedup e QA de caption).
 
@@ -779,11 +779,212 @@ A função `touch_updated_at()` é aplicada via `CREATE TRIGGER ... BEFORE UPDAT
 
 **Armadilha:** as demais tabelas **não têm** `updated_at` — são append-only por design (`events`, `llm_calls`, `memories`, `persona_versions`, `post_metrics`, `monitor_hits`, `guardrail_violations`) ou têm marco temporal próprio (`approvals.decided_at`, `interactions.replied_at`, `campaign_recon.analyzed_at`). Ao criar tabela nova, decida explicitamente em qual grupo ela entra e, se mutável, **adicione o trigger na mesma migração** — o bloco `DO $$` original não é reexecutado.
 
+As tabelas de infraestrutura da migração 0005 (`servers`, `server_services`, `devices`) **têm** o trigger, declarado na própria migração. `inventory_syncs` não tem: é append-only.
+
+---
+
+### 3.26 Infraestrutura: um servidor, vários serviços
+
+> Fonte: [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql). Decisão em [ADR-0012](adr/0012-servidor-com-varios-servicos.md).
+
+Até a migração 0004, "nó" era sinônimo de "uma instância do android-orchestrator": uma URL, uma credencial, uma saúde. O contato com um host real derrubou isso. O **mesmo IP** roda o orchestrator (worker `:8078`), o android-manager (backend `:4000` e nginx `:443`, que serve a interface e proxia `/api`) e o gateway de tela (`:9000`) — endereços, credenciais, TLS e ciclos de vida diferentes, de um único servidor físico.
+
+```
+   ┌───────────┐
+   │  servers  │  um HOST: identidade, endereços, rótulos
+   └─────┬─────┘
+         ├──────────────┐
+         ▼              ▼
+┌──────────────────┐  ┌──────────┐
+│ server_services  │  │ devices  │  containers redroid daquele host
+└────────┬─────────┘  └────┬─────┘
+         │ service_id       │ device_id
+         ▼                  ▼
+┌─────────────────────┐  ┌────────────────────┐
+│ orchestrator_nodes  │  │ account_placements │──▶ accounts
+└─────────────────────┘  └────────────────────┘
+   (extensão do serviço
+    do tipo orchestrator)
+
+   ┌──────────────────┐
+   │ inventory_syncs  │  histórico de cada varredura (server_id, service_id)
+   └──────────────────┘
+```
+
+---
+
+### 3.27 `servers`
+
+Um host. Identidade e endereços — nada de "o que ele sabe fazer", que é do serviço.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` obrig. **UNIQUE** | Nome operacional: `i9-14900k`, `media-dev` |
+| `description` | `text` | |
+| `hostname` | `text` | DNS interno / MagicDNS do Tailscale |
+| `tailscale_ip` | `text` | |
+| `lan_ip` | `text` | |
+| `preferred_host` | `text` | Qual dos caminhos usar por padrão |
+| `status` | `server_status` = `active` | Derivado da saúde dos serviços — ver [4.12](#412-server_status) |
+| `labels` | `text[]` = `{}` | Rótulos livres (`gpu`, `casa`, `datacenter`) |
+| `notes` | `text` | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.** Os três endereços existem porque o mesmo host é alcançável por Tailscale, LAN e DNS interno, e **qual funciona depende de onde o painel está rodando**. O core usa `preferred_host`; o painel monta link clicável com o melhor caminho. Não colapse tudo em um campo só — foi por não ter isso que o cadastro precisava ser refeito ao trocar de rede.
+
+`servers.status` é **derivado**, nunca fonte: a sondagem recalcula como `active` (todos os serviços habilitados online), `degraded` (algum online, algum não) ou `unreachable`. Ler o status do host sem olhar os serviços é como ler "degradado" sem saber o que caiu.
+
+Deletar um servidor cascateia `server_services`, `devices` e `orchestrator_nodes`. `accounts.discovered_from` e `account_placements.device_id` são `SET NULL` — a conta sobrevive ao servidor que a descobriu.
+
+---
+
+### 3.28 `server_services`
+
+Cada API HTTP que roda num servidor. **É aqui que mora o contrato de integração**: endereço, credencial, TLS e saúde — todos por serviço.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `server_id` | `uuid` → `servers` obrig. | `ON DELETE CASCADE` |
+| `kind` | `service_kind` obrig. | Ver [4.9](#49-service_kind) |
+| `label` | `text` | Distingue dois serviços do mesmo tipo no mesmo host |
+| `base_url` | `text` obrig. | Onde a **API** responde |
+| `web_url` | `text` | Onde **abrir no navegador**. Nem sempre igual à API |
+| `health_path` | `text` = `/healthz` | Caminho da sondagem genérica |
+| `auth_scheme` | `auth_scheme` = `none` | Ver [4.10](#410-auth_scheme) |
+| `auth_user` / `auth_secret` | `text` | Credencial **deste** serviço |
+| `verify_tls` | `boolean` = `true` | Desligar é decisão **por serviço** |
+| `enabled` | `boolean` = `true` | Serviço desabilitado não é sondado nem usado |
+| `status` | `service_status` = `unknown` | Ver [4.11](#411-service_status) |
+| `last_seen_at` | `timestamptz` | Última sondagem **bem-sucedida** |
+| `last_error` | `text` | |
+| `consecutive_errors` | `integer` = `0` | Zera no sucesso |
+| `latency_ms` | `integer` | Da última sondagem |
+| `version` | `text` | Quando o serviço reporta |
+| `capabilities` | `jsonb` = `{}` | O que este serviço sabe fazer, **descoberto na sondagem** |
+| `metadata` | `jsonb` = `{}` | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+Restrição: `UNIQUE (server_id, kind, label)` — dois serviços do mesmo tipo no mesmo host são válidos, desde que rotulados.
+
+**Quando usar / armadilhas.**
+- **`base_url` ≠ `web_url` não é redundância.** O android-manager atende a API em `/api` e a interface na raiz, atrás de HTTPS. Sem os dois campos, ou o cliente quebra ou o link do painel abre um JSON.
+- **`verify_tls = false` é decisão por serviço, nunca global.** Certificado autoassinado é a regra em rede interna; o painel mostra cadeado aberto âmbar em todo serviço HTTPS sem verificação, para que a escolha fique visível e não escondida no banco.
+- **`auth_secret` é texto na tabela.** Dívida declarada na ADR-0012, mitigada por rede fechada. Nunca exponha a coluna em endpoint de listagem.
+- **`capabilities` é guardado, não deduzido.** A interface precisa saber o que oferecer sem conhecer cada serviço (ex.: `screenshot`, `auth_enabled`, `screencast_devices`, `platforms`). O preço é um contrato implícito em `jsonb` — validado só pelo código que escreve e pelo que lê.
+- **A sondagem é por serviço e em paralelo.** Um android-manager fora do ar **não** impede o orchestrator do mesmo host de funcionar; tratar saúde por host foi o bug que originou esta tabela.
+- **`unauthorized` não é `offline`.** `401`/`403` viram `unauthorized` porque o conserto é outro: credencial, não infraestrutura.
+- Serviço do tipo `orchestrator` **também** cria/atualiza a linha correspondente em `orchestrator_nodes` (extensão). Escrever em um só dessincroniza os dois.
+
+---
+
+### 3.29 `devices`
+
+Containers redroid de um host. Antes viviam só em `orchestrator_nodes.devices_cache` — JSON bom para exibir e imprestável para referenciar, guardar histórico ou sustentar a transmissão de tela.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `server_id` | `uuid` → `servers` obrig. | `ON DELETE CASCADE` |
+| `container` | `text` obrig. | `samsung-galaxy-s24-ultra-2` |
+| `alive` | `boolean` = `false` | Container em execução |
+| `android_version` | `text` | |
+| `adb_target` | `text` | Endereço ADB (`ip:5555`). **Alvo do gateway de tela** |
+| `video_device` | `text` | `/dev/videoN` do v4l2loopback |
+| `screencast_capable` | `boolean` = `false` | Derivado: verdadeiro sse há `video_device` |
+| `under_external_management` | `boolean` = `false` | Outro sistema mexendo neste device |
+| `labels` | `text[]` = `{}` | |
+| `last_seen_at` | `timestamptz` = `now()` | |
+| `metadata` | `jsonb` = `{}` | O objeto cru como veio do serviço |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+Restrição: `UNIQUE (server_id, container)` — o nome do container é único **dentro do host**, nunca globalmente.
+
+**Quando usar / armadilhas.**
+- **Duas fontes escrevem aqui**: o orchestrator (`GET /devices`) e o android-manager (`GET /api/devices`). Quem vê primeiro cria; o outro complementa (o `UPSERT` usa `COALESCE` para não apagar campo que a outra fonte preencheu). Em divergência, **quem executa ganha** — o orchestrator.
+- **`last_seen_at` sempre exibido como idade.** O android-manager cacheia devices por ~1 minuto: um device que morreu há 40 s ainda aparece vivo. Dado velho apresentado como atual é pior que dado ausente.
+- **`screencast_capable = false` não é defeito, é limitação real.** Sem dispositivo de vídeo não há transmissão **contínua**: o modo alternativo derruba quem já estava assistindo. O painel desabilita o botão com o motivo, em vez de abrir uma tela preta.
+- **`under_external_management` é sinal de exclusão para despacho.** O android-manager roda watchdog próprio, que pode reiniciar container. Um restart no meio de uma publicação quebra a ação e pode custar a conta. Ver [contrato do android-manager](contratos/android-manager.md).
+- `metadata` guarda o objeto cru porque o esquema do android-manager não é documentado e varia entre versões. Não indexe; é rede de segurança, não caminho de consulta.
+
+---
+
+### 3.30 `inventory_syncs`
+
+Histórico append-only de cada varredura de inventário. Responde *"desde quando esta conta sumiu?"* — pergunta que aparece toda vez que uma conta cai.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `server_id` | `uuid` → `servers` | `ON DELETE CASCADE` |
+| `service_id` | `uuid` → `server_services` | `ON DELETE SET NULL` |
+| `kind` | `text` obrig. | `accounts` \| `devices` \| `actions` \| `full` |
+| `ok` | `boolean` obrig. | |
+| `accounts_found` / `accounts_new` / `accounts_gone` | `integer` = `0` | Contagens da varredura |
+| `devices_found` | `integer` = `0` | |
+| `duration_ms` | `integer` | |
+| `forced_refresh` | `boolean` = `false` | Varredura completa (`?refresh=1`) |
+| `error` | `text` | |
+| `detail` | `jsonb` = `{}` | |
+| `created_at` | `timestamptz` | |
+
+Índice: `idx_syncs_server (server_id, created_at DESC)` — a listagem de servidores mostra sempre a **última** sincronia.
+
+**Quando usar / armadilhas.** `kind` é `text` e não ENUM: o conjunto de varreduras ainda está mudando. Grave **também** as varreduras que falharam (`ok = false` + `error`) — a série de falhas é o que distingue "o serviço está instável" de "o serviço caiu agora".
+
+`forced_refresh = true` custa caro (~90 s por nó, porque o orchestrator revisita cada device). Registrar quem forçou o quê é o que impede a varredura completa de virar comportamento padrão por descuido.
+
+---
+
+### 3.31 Campos novos em `accounts` e `account_placements`
+
+A sincronização buscava as contas no orchestrator e **jogava fora quase tudo**: só o handle sobrevivia. O resultado era uma lista tecnicamente sincronizada e praticamente inútil — todo mundo com "0 seguidores". A migração 0006 grava o inventário inteiro.
+
+#### `accounts` (novos)
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `external_id` | `text` | Id da conta **na plataforma** (o `32822973107` do Instagram) |
+| `following` | `integer` = `0` | Quantas contas ela segue |
+| `media_count` | `integer` = `0` | Publicações |
+| `jid` | `text` | Telefone/JID no WhatsApp. **Nunca** preenchido em conta de rede social |
+| `last_synced_at` | `timestamptz` | Última varredura que tocou esta linha |
+| `discovered_from` | `uuid` → `servers` | Servidor de onde foi importada. `ON DELETE SET NULL`. `NULL` = criada à mão |
+
+Restrição: `UNIQUE (platform, external_id) WHERE external_id IS NOT NULL`.
+
+**Quando usar / armadilhas.**
+- **`external_id` é o único identificador estável: handle muda, id não.** O índice único parcial existe porque duas linhas com o mesmo id seriam a mesma conta duplicada — exatamente o que acontece quando alguém troca o @ entre duas varreduras.
+- O índice é **parcial**: contas criadas à mão, sem `external_id`, não colidem entre si.
+- `accounts.followers` (que já existia) e os novos contadores são o **último valor coletado**, não série temporal. Para evolução, use `post_metrics` ou uma coleta dedicada.
+- `discovered_from` marca a origem, não a propriedade: uma conta descoberta no servidor A e migrada para o B continua apontando para A até alguém corrigir. É procedência, não localização — localização é `account_placements`.
+- Conta importada nasce em `draft`/`L0`, com o inventário real e sem persona escrita. Ela **existe e não age**.
+
+#### `account_placements` (novos)
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `device_id` | `uuid` → `devices` | O device onde este placement vive. `ON DELETE SET NULL` |
+| `foreground` | `boolean` = `false` | ⚠️ Usuário Android **em execução** — ver o alerta abaixo |
+| `platform` | `platform` | Plataforma do placement (migração 0004), para o dispatcher não precisar de JOIN com `accounts` no caminho quente |
+| `external_id` | `text` | Id da conta na plataforma, **como visto neste lugar** |
+| `followers` / `following` / `media_count` | `integer` | Métricas **por lugar**, não por conta |
+
+**Quando usar / armadilhas.**
+
+> ⚠️ **`foreground` NÃO significa "está na tela".** O orchestrator devolve `active`, que quer dizer *usuário Android em execução*. O Android mantém **vários usuários rodando ao mesmo tempo** e o serviço reporta **todos** como ativos. Qual está de fato em primeiro plano ele não diz — e trocar de conta é trocar o usuário do device inteiro. Qualquer regra do tipo "só age na conta que está na tela" construída sobre este campo está errada por construção. O nome é herança do que dá para saber, não do que se gostaria de saber.
+
+- **As métricas são por lugar de propósito.** A mesma conta em dois devices pode reportar números diferentes, e **a divergência é o sinal**: um dos dois está com sessão velha, deslogada ou apontando para outra conta. Consolidar cedo em `accounts` apagaria exatamente o sintoma.
+- **`logged_in` ausente não é "deslogada".** No WhatsApp a conta **é** o usuário Android, e o serviço não reporta o campo. O código grava `logged_in = (valor is not False)` — ausência conta como logada.
+- **`device_id` é anulável e pode ficar `NULL`** quando o placement chega antes de o device ser visto pela primeira vez. O `UPSERT` preenche na varredura seguinte. Não trate `NULL` como "device inexistente".
+- A chave continua sendo `UNIQUE (account_id, node_id, container)`, não `device_id` — a linha nasce do inventário do nó, e o device é resolvido depois.
+
 ---
 
 ## 4. ENUMs e máquinas de estado
 
-Catorze ENUMs. Regra geral: adicionar valor a ENUM em Postgres é barato (`ALTER TYPE ... ADD VALUE`), **remover é caro** (recriar o tipo). Portanto: só entra valor que já tem significado operacional definido.
+Catorze ENUMs na migração 0001, mais `node_status` (0002) e quatro de infraestrutura na 0005 ([4.9](#49-service_kind) a [4.12](#412-server_status)). Regra geral: adicionar valor a ENUM em Postgres é barato (`ALTER TYPE ... ADD VALUE`), **remover é caro** (recriar o tipo). Portanto: só entra valor que já tem significado operacional definido.
 
 ### 4.1 `archetype`
 
@@ -1048,6 +1249,58 @@ Terminais: `verified`, `cancelled`, `expired`, e `failed` quando `attempts >= ma
 **Diferença `cancelled` vs `aborted`:** `cancelled` = interrompida **antes** de qualquer ação no mundo. `aborted` = interrompida **depois** de já ter agido (ou com recon bloqueado). A distinção importa para o pós-morte: `aborted` exige runbook (o que já foi publicado? precisa remover?).
 
 **Proibidas:** `draft → planning` quando `kind IN ('engagement','mixed')` e `target_url IS NOT NULL` — planejar sem ver o alvo é o cenário de risco número um do subsistema. `planning → running` sem `approved` — campanha sempre passa por humano na v1, em qualquer nível de autonomia das contas participantes.
+
+### 4.9 `service_kind`
+
+O que um serviço **é**. Determina qual cliente a sondagem usa e o que a interface oferece.
+
+| Valor | Serviço | Porta sugerida | Auth típica | Fase |
+|---|---|---|---|---|
+| `orchestrator` | android-orchestrator (worker) — executa e verifica ações | `8078` | `basic` (opt-in) | 1 |
+| `android_manager` | painel da frota redroid — leitura para nós | `443` (nginx) | `login` | 1 |
+| `screen_gateway` | transmissão de tela dos devices | `9000` | `none` hoje | 1 |
+| `persona_engine` | máquina de influencers | `8081` | `none` | 2 |
+| `media_forge` | cortes de vídeo | `8300` | `bearer` | 5 |
+| `custom` | qualquer outra API HTTP | — | — | — |
+
+**Transições:** nenhuma. Um serviço não muda de tipo — remove-se e cadastra-se outro.
+
+As portas acima são **sugestão de formulário**, não regra: o servidor é quem manda, e o operador sobrescreve. A única proibição mecânica é `orchestrator` com `:8077` na URL — essa é a porta do **executor**, que monta o `docker.sock` e escuta só em loopback; quem fala com ela tem root no host. A API recusa o cadastro ([ADR-0011](adr/0011-polling-e-registro-de-nos.md)).
+
+### 4.10 `auth_scheme`
+
+| Valor | Como funciona | Quem usa |
+|---|---|---|
+| `none` | Sem credencial | Gateway de tela; orchestrator sem `ORCH_PANEL_PASS` |
+| `basic` | `Authorization: Basic` | orchestrator worker, nginx |
+| `bearer` | Token estático no header | media-forge (Fase 5) |
+| `login` | `POST` de login devolve token com validade | **android-manager** |
+
+`login` existe como valor próprio porque o custo operacional é outro: o token expira, o cliente precisa refazer o login e repetir a chamada, e **não há como emitir credencial de menor privilégio** — o android-manager não tem chave de API nem escopo read-only. É a razão de a barreira ser a allowlist do nosso cliente.
+
+### 4.11 `service_status`
+
+| Valor | Significado | O que o operador conserta |
+|---|---|---|
+| `unknown` | Nunca sondado | Sondar |
+| `online` | Última sondagem OK | — |
+| `degraded` | Responde, mas com parte das funções indisponível | Depende de `last_error` |
+| `offline` | Não responde | Infraestrutura, rede, processo caído |
+| `unauthorized` | `401`/`403` | **Credencial** — não é queda |
+| `disabled` | `enabled = false` | Nada; está desligado por decisão |
+
+A separação `offline` × `unauthorized` não é cosmética: são consertos diferentes, e tratar credencial errada como "fora do ar" faz o operador reiniciar serviço saudável. O painel usa cores distintas pelo mesmo motivo.
+
+### 4.12 `server_status`
+
+| Valor | Significado |
+|---|---|
+| `active` | **Todos** os serviços habilitados online |
+| `degraded` | Algum online, algum não |
+| `unreachable` | Nenhum serviço habilitado respondendo |
+| `disabled` | Servidor desligado por decisão |
+
+**É derivado, recalculado ao fim de cada sondagem** — nunca escrito à mão pelo fluxo normal. E é resumo, não diagnóstico: um host `degraded` não diz o que caiu. A resposta está em `server_services.status` + `last_error`, serviço por serviço.
 
 ---
 
@@ -1574,8 +1827,11 @@ Casos específicos deste schema:
 
 ## Ver também
 
-- [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade
+- [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade do núcleo
+- [`db/migrations/0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) · [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) — infraestrutura e inventário ([3.26](#326-infraestrutura-um-servidor-vários-serviços))
 - [ADR-0001](adr/0001-core-proprio.md) — por que core próprio; por que o modelo de dados é nosso
+- [ADR-0012](adr/0012-servidor-com-varios-servicos.md) — por que servidor e serviço são tabelas diferentes
+- [docs/contratos/android-manager.md](contratos/android-manager.md) — o serviço que alimenta `devices`
 - [docs/04 — Persona Card](04-persona-card-spec.md) — o schema de `accounts.persona_card`
 - [docs/05 — Loop do agente](05-loop-do-agente.md) — quem escreve em qual tabela, em qual passo
 - [docs/06 — Campanhas](06-campanhas.md) — `spread_policy`, recon e espalhamento
