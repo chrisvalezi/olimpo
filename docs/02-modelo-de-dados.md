@@ -555,7 +555,7 @@ Brief coordenado emitido pelo manager. Cada conta elegível traduz o brief pela 
 
 Restrição: `CHECK (window_end > window_start)`.
 
-**Quando usar / armadilhas.** `spread_policy` é `NOT NULL` **sem default** — é a única coluna do schema com essa combinação, e é intencional: é impossível criar campanha sem declarar espalhamento. `{}` passa no banco mas **tem que** ser rejeitado na validação da aplicação (jitter, participação parcial e limite de grafo são obrigatórios). Ver [docs/06 § Espalhamento](06-campanhas.md#espalhamento).
+**Quando usar / armadilhas.** `spread_policy` é `NOT NULL` **sem default** — é a única coluna do schema com essa combinação, e é intencional: é impossível criar campanha sem declarar espalhamento. `{}` passa no banco mas **tem que** ser rejeitado na validação da aplicação (jitter, participação parcial e limite de grafo são obrigatórios). Ver [docs/06 § Espalhamento](06-campanhas.md#5-espalhamento).
 
 Campanha de engajamento (`kind IN ('engagement','mixed')` com `target_url`) **não pode** sair de `draft` direto para `planning`: passa obrigatoriamente por `recon_pending`. Planejar sem ver o alvo é o cenário em que 20 contas comentam num post que virou crime/tragédia.
 

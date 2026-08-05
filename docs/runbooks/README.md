@@ -35,7 +35,7 @@ docker compose exec postgres psql -U olimpo -d olimpo -c \
 | Queda abrupta de seguidores / posts sem alcance | `QuedaDeSeguidores` | [conta-banida.md](conta-banida.md) (seção shadowban) |
 | Conta ativa há > 48 h sem ação nenhuma | `ContaSilenciosa` | [fila-travada.md](fila-travada.md) |
 | Preciso parar tudo, agora | — | [kill-switch.md](kill-switch.md) |
-| Preciso parar **uma** conta | — | [kill-switch.md](kill-switch.md#4-parada-por-conta) |
+| Preciso parar **uma** conta | — | [kill-switch.md](kill-switch.md#4-correção--parada-por-conta) |
 | Como retomar depois de uma parada | — | [kill-switch.md](kill-switch.md#6-retomada) |
 | Tasks empilhando, nada sai | `FilaTravada`, `FilaRealtimeAtrasada` | [fila-travada.md](fila-travada.md) |
 | Task mais antiga pendente com idade crescente | `FilaTravada` | [fila-travada.md](fila-travada.md) |
@@ -51,7 +51,7 @@ docker compose exec postgres psql -U olimpo -d olimpo -c \
 | Agente escrevendo fora da persona | `PersonaDerivando` | [conteudo-improprio-publicado.md](conteudo-improprio-publicado.md#7-quando-não-é-incidente-mas-deriva) |
 | Guardrail bloqueando tudo | `GuardrailBloqueandoDemais` | [conteudo-improprio-publicado.md](conteudo-improprio-publicado.md#5-correção-do-guardrail) |
 | Postgres corrompido, perdido ou revertido | `PostgresIndisponivel` | [restaurar-backup.md](restaurar-backup.md) |
-| Backup não rodou | `BackupNaoVerificado` | [restaurar-backup.md](restaurar-backup.md#7-prevenção) |
+| Backup não rodou | `BackupNaoVerificado` | [restaurar-backup.md](restaurar-backup.md#8-prevenção) |
 | Worker Celery morto | `WorkerMorto` | [fila-travada.md](fila-travada.md#31-worker-morto-ou-sem-consumir) |
 | Vazamento de segredo / acesso indevido | — | [../12-seguranca.md](../12-seguranca.md#54-resposta-a-incidente) |
 

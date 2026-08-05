@@ -320,7 +320,7 @@ O critério de saída da Fase 0 é literalmente isto: *"task `criar_post` roda p
 |---|---|---|---|
 | android-orchestrator | [contrato](contratos/android-orchestrator.md) | ✅ **VALIDADO em 2026-08-05** contra o código. 6 ❓ residuais, nenhum bloqueante | ⚠️ **smoke test por ação** — ver abaixo |
 | máquina de influencers | [contrato](contratos/maquina-de-influencers.md#10-perguntas-para-validar-com-o-serviço-real) | escrito às cegas — 8 ❓ bloqueantes | a nº 1 (consistência facial) é a mais importante |
-| android-manager | [contrato](contratos/android-manager.md#7-perguntas-para-validar-com-o-serviço-real) | escrito às cegas — 4 ❓ | confirmar se existe API HTTP |
+| android-manager | [contrato](contratos/android-manager.md#10-o-que-continua-incerto) | escrito às cegas — 4 ❓ | confirmar se existe API HTTP |
 | media-forge | [especificação](contratos/media-forge.md) | não existe; a spec **é** o contrato | — |
 
 **Regra de trabalho:** documento com ❓ aberto no caminho crítico significa cliente que **não sai de dry-run**.

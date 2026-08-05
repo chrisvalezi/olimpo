@@ -13,9 +13,13 @@ O Olimpo é **o cérebro**. Ele não fala com o Instagram nem gera imagem — el
 | Serviço | Papel | Repositório |
 |---|---|---|
 | **android-orchestrator** | Executa e **verifica** ações em device real | `chrisvalezi/android-orchestrator` |
-| **máquina de influencers** | Persona, história, geração de foto/vídeo, brands | privado |
 | **android-manager** | Frota de containers redroid | `chrisvalezi/android-manager` |
 | **media-forge** | Cortes e edição de vídeo — *a construir (Fase 5)* | — |
+
+A **máquina de influencers** era o quarto serviço e foi absorvida: persona,
+identidade visual e geração de imagem e vídeo agora vivem aqui dentro
+([ADR-0014](docs/adr/0014-absorver-a-maquina-de-influencers.md)). Duas fontes
+de verdade para a mesma personagem não sobrevivem ao tempo.
 
 O core **nunca** chama a plataforma diretamente. Toda ação vira uma task despachada ao orchestrator, que confirma a execução. Essa separação é o ativo estratégico do projeto — ver [ADR-0001](docs/adr/0001-core-proprio.md).
 
@@ -49,7 +53,7 @@ Todo agente — seja influencer, página de fofoca ou conta de clipagem — roda
 ```
 PLAN ─▶ SOURCE ─▶ PRODUCE ─▶ QA ─▶ DISPATCH ─▶ VERIFY ─▶ RECORD ─▶ REFLECT
          │
-         ├─ influencer → GeneratedSource  (máquina de influencers)
+         ├─ influencer → GeneratedSource  (geração própria — docs/13)
          ├─ fofoca     → CuratedSource    (monitores 24/7 + ingestão)
          └─ clipagem   → DerivedSource    (media-forge)
 ```
@@ -71,7 +75,7 @@ Só depois de *ver* o conteúdo o sistema decide quem participa e o que cada per
 
 ### Espalhamento anti-detecção
 
-N contas fazendo a mesma coisa na mesma janela é o sinal nº 1 de detecção de farm. `spread_policy` é **campo obrigatório** em toda campanha: jitter temporal, texto sempre único, participação parcial e respeito à cadência natural de cada conta. Ver [docs/06](docs/06-campanhas.md#espalhamento).
+N contas fazendo a mesma coisa na mesma janela é o sinal nº 1 de detecção de farm. `spread_policy` é **campo obrigatório** em toda campanha: jitter temporal, texto sempre único, participação parcial e respeito à cadência natural de cada conta. Ver [docs/06](docs/06-campanhas.md#5-espalhamento).
 
 ---
 
@@ -83,7 +87,7 @@ Tudo vive em [`docs/`](docs/). Comece pelo [índice](docs/README.md).
 |---|---|
 | **Conceito** | [Visão geral](docs/00-visao-geral.md) · [Arquitetura](docs/01-arquitetura.md) · [Glossário](docs/glossario.md) |
 | **Especificações** | [Modelo de dados](docs/02-modelo-de-dados.md) · [Persona Card](docs/04-persona-card-spec.md) · [Loop do agente](docs/05-loop-do-agente.md) |
-| **Subsistemas** | [Campanhas](docs/06-campanhas.md) · [Monitores 24/7](docs/07-monitores.md) · [LLM Gateway](docs/09-llm-gateway.md) · [Painel](docs/10-painel.md) |
+| **Subsistemas** | [Campanhas](docs/06-campanhas.md) · [Monitores 24/7](docs/07-monitores.md) · [LLM Gateway](docs/09-llm-gateway.md) · [Painel](docs/10-painel.md) · [Geração de mídia](docs/13-geracao-de-midia.md) · [Motores de prompt](docs/14-motores-de-prompt.md) |
 | **Operação** | [Guardrails](docs/08-guardrails-e-autonomia.md) · [Observabilidade](docs/11-observabilidade.md) · [Segurança](docs/12-seguranca.md) · [Runbooks](docs/runbooks/) |
 | **Integrações** | [Contratos de API](docs/contratos/) dos serviços existentes |
 | **Processo** | [Fases e handoffs](docs/fases/) · [Decisões (ADR)](docs/adr/) · [CHANGELOG](CHANGELOG.md) |

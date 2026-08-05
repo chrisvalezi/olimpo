@@ -50,7 +50,7 @@ seed: ## Popula com dados de exemplo (1 influencer)
 test: ## Roda os testes
 	$(COMPOSE) exec api pytest -q
 
-check-docs: ## Verifica links internos quebrados na documentação
+check-docs: ## Verifica links e âncoras de seção na documentação
 	@python3 scripts/check_docs.py
 
 lint: ## ruff + mypy

@@ -43,7 +43,7 @@ jobs:
 
       # Documentação que aponta para arquivo inexistente promete uma resposta
       # que não existe. Ver scripts/check_docs.py.
-      - name: Links internos
+      - name: Links e âncoras internas
         run: python scripts/check_docs.py
 
   migrations:

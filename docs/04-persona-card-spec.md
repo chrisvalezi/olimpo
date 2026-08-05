@@ -446,7 +446,7 @@ Para `gossip` e `clipper`, `face_reference` é opcional — a marca visual é do
 | `routine` | `string` | sim | Rotina diária. Ancora horário de post e o que ela está fazendo às 15h |
 | `current_situation` | `string` | não | Objetivo de médio prazo; alimenta arcos |
 
-**Sobre `house_agents` e crossover.** Interação entre contas da casa é conteúdo poderoso e **é rastro**. Só entram aqui agentes com relação declarada, e `crossover_policy` (`nunca` \| `raro` \| `esporadico` \| `frequente`) é lido pelo motor de campanhas, que aplica o limite de grafo de [docs/06](06-campanhas.md#espalhamento). Declarar aqui **não** autoriza interação livre — autoriza o manager a considerar o par.
+**Sobre `house_agents` e crossover.** Interação entre contas da casa é conteúdo poderoso e **é rastro**. Só entram aqui agentes com relação declarada, e `crossover_policy` (`nunca` \| `raro` \| `esporadico` \| `frequente`) é lido pelo motor de campanhas, que aplica o limite de grafo de [docs/06](06-campanhas.md#5-espalhamento). Declarar aqui **não** autoriza interação livre — autoriza o manager a considerar o par.
 
 ---
 

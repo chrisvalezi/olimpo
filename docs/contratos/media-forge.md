@@ -29,7 +29,7 @@ Processar uma live de 3 h leva de minutos a dezenas de minutos. Não existe modo
 POST /v1/jobs  ──▶  job_id  ──▶  webhook (primário) + polling (fallback)  ──▶  GET /v1/jobs/{id}  ──▶  N clipes
 ```
 
-Mesmo padrão do orchestrator: **webhook como caminho feliz, polling como rede de segurança** — ver [android-orchestrator §5](android-orchestrator.md#5-verificação-de-conclusão--webhook-com-fallback-de-polling). Latência não é crítica aqui (clipagem roda em lote), mas task zumbi continua sendo inaceitável.
+Mesmo padrão do orchestrator: **webhook como caminho feliz, polling como rede de segurança** — ver [android-orchestrator §5](android-orchestrator.md#7-verificação-e-níveis-de-evidência). Latência não é crítica aqui (clipagem roda em lote), mas task zumbi continua sendo inaceitável.
 
 ### Autenticação
 
