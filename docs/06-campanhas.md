@@ -261,11 +261,13 @@ Formato de `spread_policy`:
   "max_accounts_per_target": 12,
   "min_gap_same_target_minutes": 20,
   "text_uniqueness": "per_persona",
-  "action_mix": {"like": 1.0, "comment": 0.35, "save": 0.2, "share": 0.1}
+  "action_mix": {"like": 1.0, "comment": 0.35, "save": 0.2}
 }
 ```
 
 **Sobre `action_mix`:** nem todo participante faz tudo. Uma seção de comentários onde *todos* que curtiram também comentaram é tão anômala quanto o inverso. A proporção imita o funil natural — muita curtida, poucos comentários, menos saves ainda.
+
+> **`share` não entra aqui.** Compartilhar um post de feed não existe no orchestrator. O que existe é sobre *reels*: `reel-action do=[share]` manda o reel por DM a terceiros (spam, não campanha), `do=[story]` o adiciona ao próprio story e `do=[repost]` faz repost nativo. Os dois últimos são publicação na conta, não engajamento no alvo — e por isso pertencem a uma campanha de conteúdo, não ao `action_mix`.
 
 ---
 

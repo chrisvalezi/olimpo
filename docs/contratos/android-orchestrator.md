@@ -638,7 +638,7 @@ Custo: uma task extra ou um humano olhando. Benefício: nunca postar duas vezes 
 
 ## 13. Armadilhas
 
-### 13.1 ⚠️ A armadilha GRAVE: a task fantasma (`pending` para sempre)
+### 13.1 A armadilha GRAVE: a task fantasma (`pending` para sempre)
 
 ✅ **VALIDADO no código.** Se `action` vier **sem o prefixo da plataforma** OU `params` vier **vazio**, o despacho falha com **400 no executor** — mas o worker apenas faz:
 
@@ -657,7 +657,7 @@ Isso é ainda mais traiçoeiro porque `pending` longo **também é normal** (dev
 2. **`params` nunca vazio.** O cliente injeta `{"account": …}` como piso em toda task.
 3. **Alarme de task fantasma.** Task em `dispatched` há mais de `timeout(ação) + margem` **sem nenhum `last_job_id`** → evento `orchestrator.task_stuck_pending` com severidade `warn`, e o painel mostra o diagnóstico (device vivo? conta logada? hora chegou?).
 
-### 13.2 ⚠️ Texto com `--` é recusado
+### 13.2 Texto com `--` é recusado
 
 ✅ **VALIDADO.** Legenda, comentário e resposta são entregues ao `autodroid` como argumento posicional, e ele **trunca o texto no primeiro token começando com `--`** (qualquer um, inclusive `--` sozinho). **Não há escape.** O droid **recusa** o texto na entrada (`exit 2` em comentários, `exit 1` em post), e a API devolve **400**.
 
@@ -665,13 +665,13 @@ Um hífen simples (`-x`, `traço-simples`) passa normalmente.
 
 **Isso morde exatamente onde dói:** captions e comentários vêm de LLM, e travessão/traço duplo é comum em português. `_sanitize()` no cliente remove tokens iniciados por `--` **antes** de qualquer despacho. Todo texto gerado passa por lá — sem exceção.
 
-### 13.3 ⚠️ `publish` é opt-in
+### 13.3 `publish` é opt-in
 
 ✅ **VALIDADO.** Toda a família `post-*` só toca em *Compartilhar* com `publish: true`. **Sem ele, o comando monta tudo e PARA na tela de legenda** — e devolve `ok: true`.
 
 Ou seja: uma task de publicação sem `publish` termina `done`, com `ok: true`, e **nada foi publicado**. É o modo seguro de testar — e é uma armadilha silenciosa se esquecido em produção. `build_params()` põe `publish: True` por default e deixa o dry-run explícito.
 
-### 13.4 ⚠️ As rotas de controle mentem
+### 13.4 As rotas de controle mentem
 
 ✅ **VALIDADO.** `POST /tasks/{id}/cancel|requeue|delete` e `POST /containers/{c}/pause|resume` são **botões do painel HTML**: respondem **303** com `Location: /`, e o handler é um `try/except Exception` que **engole a exceção** e redireciona igual.
 
@@ -749,7 +749,7 @@ Abrir o reel faz o próprio app buscar e cachear o JSON público da mídia; o dr
 
 ---
 
-## 15. ⚠️ AVISO: quase nada foi executado no device
+## 15. AVISO: quase nada foi executado no device
 
 ✅ **VALIDADO** contra o `KNOWN_ISSUES.md` do próprio serviço. **Este é o maior risco do projeto Olimpo hoje — maior que qualquer detalhe de contrato acima.**
 

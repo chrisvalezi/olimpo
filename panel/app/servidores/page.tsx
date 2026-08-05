@@ -75,6 +75,74 @@ export default function Servidores() {
   );
 }
 
+/**
+ * Contas que o nó tem logadas e o Olimpo ainda não conhece.
+ *
+ * Elas não são criadas na sincronização de propósito: uma conta no Olimpo
+ * precisa de persona, arquétipo e nível de autonomia — decisões de humano.
+ * Mas ficar invisível também é errado, então elas aparecem aqui.
+ */
+function Descobertas({ nodeId, onImport }: { nodeId: string; onImport: () => void }) {
+  const { data, mutate: reload } = useSWR(`/v1/nodes/${nodeId}/discovered`, api);
+  const [importando, setImportando] = useState(false);
+  const contas = data?.discovered ?? [];
+
+  if (contas.length === 0) return null;
+
+  async function importar(usernames?: string[]) {
+    setImportando(true);
+    try {
+      await mutate(`/v1/nodes/${nodeId}/import`, "POST", { usernames: usernames ?? null });
+      await reload();
+      onImport();
+    } finally {
+      setImportando(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2 rounded border border-warn/30 bg-warn/5 p-2.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-amber-200">
+          {contas.length} conta{contas.length > 1 ? "s" : ""} logada
+          {contas.length > 1 ? "s" : ""} que o Olimpo não conhece
+        </span>
+        <button
+          onClick={() => importar()}
+          disabled={importando}
+          className="rounded border border-warn/40 px-2 py-0.5 text-xs text-amber-200 hover:bg-warn/10 disabled:opacity-50"
+        >
+          {importando ? "importando…" : "importar todas"}
+        </button>
+      </div>
+      <ul className="space-y-1">
+        {contas.map((c: any) => (
+          <li key={c.handle} className="flex items-center justify-between text-xs">
+            <span className="text-slate-300">
+              {c.handle}
+              <span className="ml-1.5 text-slate-600">{c.platform}</span>
+              {c.containers.length > 1 && (
+                <span className="ml-1.5 text-warn">{c.containers.length} devices</span>
+              )}
+            </span>
+            <button
+              onClick={() => importar([c.username])}
+              disabled={importando}
+              className="text-slate-500 hover:text-slate-200 disabled:opacity-50"
+            >
+              importar
+            </button>
+          </li>
+        ))}
+      </ul>
+      <p className="text-xs text-slate-600">
+        Importadas nascem em <code>draft</code>/L0: vinculadas ao device, mas sem
+        persona e sem operar até alguém ativá-las.
+      </p>
+    </div>
+  );
+}
+
 function NodeCard({ node, probing, onProbe }: { node: any; probing: boolean; onProbe: () => void }) {
   const tones: Record<string, string> = {
     active: "text-active border-active/40 bg-active/10",
@@ -110,6 +178,8 @@ function NodeCard({ node, probing, onProbe }: { node: any; probing: boolean; onP
           {node.last_error}
         </div>
       )}
+
+      {node.inventory_refreshed_at && <Descobertas nodeId={node.id} onImport={onProbe} />}
 
       <div className="flex items-center justify-between text-xs text-slate-500">
         <span>

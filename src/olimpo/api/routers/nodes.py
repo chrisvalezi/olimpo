@@ -190,10 +190,18 @@ async def probe_node(node_id: UUID, refresh: bool = False) -> dict[str, Any]:
                 "node_id": node_id,
                 "container": a.get("container") or "?",
                 "android_user": a.get("user"),
-                "logged_in": bool(a.get("logged_in", True)),
+                # No WhatsApp a conta É o user Android e o serviço não reporta
+                # logged_in. Ausente não significa deslogada.
+                "logged_in": a.get("logged_in") is not False,
                 "h1": username, "h2": f"@{username}",
             })
             linked += len(res.fetchall())
+
+    known = await _known_handles()
+    discovered = sorted({
+        a["username"] for a in acc_list
+        if a.get("username") and _handle_for(a) not in known
+    })
 
     return {
         "ok": True,
@@ -201,9 +209,128 @@ async def probe_node(node_id: UUID, refresh: bool = False) -> dict[str, Any]:
         "accounts_linked": linked,
         "devices": len(dev_list),
         "actions": len(actions.get("actions", {})),
-        # Contas que o nó tem logadas e que o Olimpo ainda não conhece.
-        "unlinked": [a.get("username") for a in acc_list][: 50],
+        # Contas logadas no nó que o Olimpo ainda não conhece. Elas NÃO são
+        # criadas sozinhas: uma conta no Olimpo precisa de persona, arquétipo
+        # e nível de autonomia — decisões que só um humano toma.
+        "discovered": discovered,
     }
+
+
+def _handle_for(entry: dict[str, Any]) -> str:
+    """Normaliza o identificador do orchestrator para o nosso handle.
+
+    O serviço devolve o username sem "@" no Instagram; no WhatsApp devolve o
+    nome do perfil, onde "@" não faz sentido.
+    """
+    username = (entry.get("username") or "").strip()
+    platform = (entry.get("platform") or "instagram").lower()
+    return username if platform == "whatsapp" else f"@{username.lstrip('@')}"
+
+
+async def _known_handles() -> set[str]:
+    async with session_scope() as s:
+        rows = (await s.execute(text("SELECT handle FROM accounts"))).scalars().all()
+    return set(rows)
+
+
+class ImportIn(BaseModel):
+    usernames: list[str] | None = Field(
+        default=None, description="Se omitido, importa todas as descobertas."
+    )
+    archetype: str = "influencer"
+
+
+@router.get("/{node_id}/discovered")
+async def discovered_accounts(node_id: UUID) -> dict[str, Any]:
+    """Contas logadas no nó que ainda não existem no Olimpo."""
+    async with session_scope() as s:
+        cache = (await s.execute(
+            text("SELECT accounts_cache FROM orchestrator_nodes WHERE id = :id"),
+            {"id": node_id},
+        )).scalar()
+    if cache is None:
+        raise HTTPException(404, "nó não encontrado")
+
+    known = await _known_handles()
+    out: dict[str, dict[str, Any]] = {}
+    for entry in cache:
+        handle = _handle_for(entry)
+        if not entry.get("username") or handle in known:
+            continue
+        # A mesma conta pode aparecer em vários containers — é uma conta só,
+        # com vários lugares onde ela pode operar.
+        item = out.setdefault(handle, {
+            "handle": handle,
+            "username": entry["username"],
+            "platform": entry.get("platform", "instagram"),
+            "containers": [],
+        })
+        item["containers"].append(entry.get("container"))
+    return {"discovered": list(out.values())}
+
+
+@router.post("/{node_id}/import")
+async def import_accounts(node_id: UUID, body: ImportIn) -> dict[str, Any]:
+    """Cria no Olimpo as contas descobertas no nó.
+
+    Nascem em `draft` e L0: existem no sistema e já ficam vinculadas ao
+    device, mas não agem até alguém escrever a persona e ativá-las.
+    """
+    async with session_scope() as s:
+        cache = (await s.execute(
+            text("SELECT accounts_cache FROM orchestrator_nodes WHERE id = :id"),
+            {"id": node_id},
+        )).scalar()
+    if cache is None:
+        raise HTTPException(404, "nó não encontrado")
+
+    wanted = set(body.usernames) if body.usernames else None
+    known = await _known_handles()
+    created: list[str] = []
+
+    async with session_scope() as s:
+        for entry in cache:
+            username = entry.get("username")
+            if not username or (wanted and username not in wanted):
+                continue
+            handle = _handle_for(entry)
+            platform = (entry.get("platform") or "instagram").lower()
+            if platform not in {"instagram", "tiktok", "whatsapp"}:
+                continue
+
+            if handle not in known:
+                await s.execute(text("""
+                    INSERT INTO accounts (handle, platform, archetype, status, autonomy,
+                                          persona_card, notes)
+                    VALUES (:handle, CAST(:platform AS platform),
+                            CAST(:archetype AS archetype), 'draft', 'L0',
+                            '{}'::jsonb, :notes)
+                    ON CONFLICT (platform, handle) DO NOTHING
+                """), {
+                    "handle": handle, "platform": platform,
+                    "archetype": body.archetype,
+                    "notes": "importada do inventário do nó — persona ainda não escrita",
+                })
+                known.add(handle)
+                created.append(handle)
+
+            await s.execute(text("""
+                INSERT INTO account_placements
+                    (account_id, node_id, container, android_user, logged_in, last_seen_at)
+                SELECT id, :node_id, :container, :android_user, :logged_in, now()
+                  FROM accounts WHERE handle = :handle
+                ON CONFLICT (account_id, node_id, container) DO UPDATE
+                   SET logged_in = EXCLUDED.logged_in, last_seen_at = now()
+            """), {
+                "node_id": node_id, "handle": handle,
+                "container": entry.get("container") or "?",
+                "android_user": entry.get("user"),
+                # No WhatsApp a conta É o user Android, então o serviço não
+                # reporta logged_in. Ausente não quer dizer deslogada.
+                "logged_in": entry.get("logged_in") is not False,
+            })
+
+    return {"imported": created, "count": len(created)}
 
 
 def _json(value: Any) -> str:
