@@ -34,6 +34,13 @@ class Settings(BaseSettings):
     litellm_master_key: str = ""
     llm_daily_budget_usd: float = 5.0
 
+    # --- geração de mídia -------------------------------------------------
+    # A geração com IMAGEM DE REFERÊNCIA e a de vídeo não passam pelo
+    # gateway: ele só expõe texto→imagem. Ver media/providers/base.py.
+    fal_api_key: str = ""
+    openai_image_key: str = ""
+    replicate_api_key: str = ""
+
     # --- serviços externos ------------------------------------------------
     # Semente do primeiro nó numa instalação nova. A lista real de servidores
     # vive em `orchestrator_nodes` — o serviço não tem índice de frota, e não
