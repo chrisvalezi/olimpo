@@ -16,9 +16,13 @@ router = APIRouter(prefix="/v1/accounts", tags=["contas"])
 @router.get("")
 async def list_accounts(
     archetype: str | None = None,
+    platform: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
     where, params = [], {}
+    if platform:
+        where.append("a.platform = CAST(:platform AS platform)")
+        params["platform"] = platform
     if archetype:
         where.append("a.archetype = CAST(:archetype AS archetype)")
         params["archetype"] = archetype

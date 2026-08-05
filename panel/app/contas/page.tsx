@@ -12,6 +12,19 @@ const AUTONOMY: Record<string, { cor: string; nome: string }> = {
   L3: { cor: "text-l3 border-l3/40 bg-l3/10", nome: "sênior" },
 };
 
+// A plataforma decide o que a conta PODE fazer. WhatsApp não tem feed nem
+// seguidor; deixar isso implícito na tela é como o erro de classe começa.
+const PLATAFORMA: Record<string, { cor: string; rotulo: string }> = {
+  instagram: { cor: "border-pink-500/40 bg-pink-500/10 text-pink-300", rotulo: "IG" },
+  whatsapp: { cor: "border-emerald-500/40 bg-emerald-500/10 text-emerald-300", rotulo: "WA" },
+  tiktok: { cor: "border-cyan-500/40 bg-cyan-500/10 text-cyan-300", rotulo: "TT" },
+};
+
+const ARQUETIPO: Record<string, string> = {
+  influencer: "influencer", gossip: "fofoca", clipper: "clipagem",
+  messaging: "mensageria", collector: "coletora",
+};
+
 const STATUS: Record<string, string> = {
   active: "text-active", warming: "text-warming", paused: "text-paused",
   suspended: "text-suspended", draft: "text-slate-500", lost: "text-suspended",
@@ -20,7 +33,7 @@ const STATUS: Record<string, string> = {
 export default function Contas() {
   const [filtro, setFiltro] = useState<string>("");
   const { data } = useSWR(
-    `/v1/accounts${filtro ? `?archetype=${filtro}` : ""}`, api,
+    `/v1/accounts${filtro ? `?platform=${filtro}` : ""}`, api,
     { refreshInterval: 20_000 },
   );
 
@@ -31,7 +44,7 @@ export default function Contas() {
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-semibold text-slate-100">Contas</h1>
         <div className="flex gap-1">
-          {[["", "todas"], ["influencer", "influencers"], ["gossip", "fofoca"], ["clipper", "clipagem"]].map(
+          {[["", "todas"], ["instagram", "Instagram"], ["whatsapp", "WhatsApp"], ["tiktok", "TikTok"]].map(
             ([v, label]) => (
               <button
                 key={v}
@@ -67,6 +80,11 @@ export default function Contas() {
 
 function ContaCard({ conta }: { conta: any }) {
   const aut = AUTONOMY[conta.autonomy] ?? AUTONOMY.L0;
+  const plat = PLATAFORMA[conta.platform] ?? {
+    cor: "border-slate-600 bg-slate-700/30 text-slate-400", rotulo: conta.platform,
+  };
+  // Mensageria e coletora não rodam o loop de conteúdo — não têm arco.
+  const rodaLoop = !["messaging", "collector"].includes(conta.archetype);
   const placements = conta.placements ?? [];
   // Sem placement, o Olimpo não sabe em qual device agir — a conta não opera.
   const semDevice = placements.length === 0;
@@ -77,10 +95,16 @@ function ContaCard({ conta }: { conta: any }) {
   return (
     <div className="card space-y-3">
       <div className="flex items-start justify-between">
-        <div>
-          <div className="font-medium text-slate-100">{conta.handle}</div>
-          <div className="text-xs text-slate-500">
-            {conta.persona_name}
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className={`rounded border px-1 py-0.5 text-[10px] font-medium ${plat.cor}`}>
+              {plat.rotulo}
+            </span>
+            <span className="truncate font-medium text-slate-100">{conta.handle}</span>
+          </div>
+          <div className="mt-0.5 text-xs text-slate-500">
+            {ARQUETIPO[conta.archetype] ?? conta.archetype}
+            {conta.persona_name && ` · ${conta.persona_name}`}
             {conta.niche && ` · ${conta.niche}`}
           </div>
         </div>
@@ -89,7 +113,7 @@ function ContaCard({ conta }: { conta: any }) {
         </span>
       </div>
 
-      {conta.arc && (
+      {rodaLoop && conta.arc && (
         <div className="rounded border border-surface-border bg-surface/60 p-2 text-xs text-slate-400">
           <span className="text-slate-600">arco atual · </span>
           {conta.arc}
@@ -98,7 +122,7 @@ function ContaCard({ conta }: { conta: any }) {
 
       <div className="flex items-center gap-3 text-xs">
         <span className={STATUS[conta.status] ?? "text-slate-500"}>● {conta.status}</span>
-        <span className="text-slate-500">{conta.followers} seguidores</span>
+        {rodaLoop && <span className="text-slate-500">{conta.followers} seguidores</span>}
         {conta.tasks_open > 0 && (
           <span className="text-info">{conta.tasks_open} em voo</span>
         )}

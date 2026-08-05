@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from olimpo.core.db import session_scope
+from olimpo.integrations.actions import (
+    ARCHETYPES_BY_PLATFORM,
+    default_archetype,
+    supported_platforms,
+)
 from olimpo.integrations.orchestrator import OrchestratorClient
 
 log = structlog.get_logger(__name__)
@@ -154,6 +159,8 @@ async def probe_node(node_id: UUID, refresh: bool = False) -> dict[str, Any]:
 
     acc_list = accounts.get("accounts", [])
     dev_list = devices.get("devices", [])
+    catalog = actions.get("actions", {})
+    plats = supported_platforms(catalog)
 
     async with session_scope() as s:
         await s.execute(text("""
@@ -162,12 +169,16 @@ async def probe_node(node_id: UUID, refresh: bool = False) -> dict[str, Any]:
                    last_seen_at = now(), inventory_refreshed_at = now(),
                    accounts_cache = CAST(:acc AS jsonb),
                    devices_cache  = CAST(:dev AS jsonb),
-                   actions_cache  = CAST(:act AS jsonb)
+                   actions_cache  = CAST(:act AS jsonb),
+                   platforms      = CAST(:plats AS text[])
              WHERE id = :id
         """), {
             "id": node_id,
             "acc": _json(acc_list), "dev": _json(dev_list),
-            "act": _json(actions.get("actions", {})),
+            "act": _json(catalog),
+            # Um nó só de WhatsApp não pode receber task de Instagram só
+            # porque tem device livre.
+            "plats": plats,
         })
 
         # Casa as contas do nó com as contas do Olimpo pelo handle. O
@@ -208,7 +219,8 @@ async def probe_node(node_id: UUID, refresh: bool = False) -> dict[str, Any]:
         "accounts_found": len(acc_list),
         "accounts_linked": linked,
         "devices": len(dev_list),
-        "actions": len(actions.get("actions", {})),
+        "actions": len(catalog),
+        "platforms": plats,
         # Contas logadas no nó que o Olimpo ainda não conhece. Elas NÃO são
         # criadas sozinhas: uma conta no Olimpo precisa de persona, arquétipo
         # e nível de autonomia — decisões que só um humano toma.
@@ -237,7 +249,9 @@ class ImportIn(BaseModel):
     usernames: list[str] | None = Field(
         default=None, description="Se omitido, importa todas as descobertas."
     )
-    archetype: str = "influencer"
+    #: Só se aplica a contas de rede social. Conta de WhatsApp entra sempre
+    #: como `messaging` — ela não tem feed para alimentar.
+    archetype: str | None = None
 
 
 @router.get("/{node_id}/discovered")
@@ -298,6 +312,10 @@ async def import_accounts(node_id: UUID, body: ImportIn) -> dict[str, Any]:
             if platform not in {"instagram", "tiktok", "whatsapp"}:
                 continue
 
+            archetype = body.archetype or default_archetype(platform)
+            if archetype not in ARCHETYPES_BY_PLATFORM[platform]:
+                archetype = default_archetype(platform)
+
             if handle not in known:
                 await s.execute(text("""
                     INSERT INTO accounts (handle, platform, archetype, status, autonomy,
@@ -308,7 +326,7 @@ async def import_accounts(node_id: UUID, body: ImportIn) -> dict[str, Any]:
                     ON CONFLICT (platform, handle) DO NOTHING
                 """), {
                     "handle": handle, "platform": platform,
-                    "archetype": body.archetype,
+                    "archetype": archetype,
                     "notes": "importada do inventário do nó — persona ainda não escrita",
                 })
                 known.add(handle)

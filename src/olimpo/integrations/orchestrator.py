@@ -25,6 +25,7 @@ from typing import Any, Protocol
 
 import structlog
 
+from olimpo.integrations.actions import PlatformMismatch, assert_same_platform
 from olimpo.integrations.base import BaseClient
 
 log = structlog.get_logger(__name__)
@@ -107,6 +108,7 @@ class OrchestratorClient(BaseClient):
         account: str,
         action: str,
         params: dict[str, Any],
+        platform: str | None = None,
         scheduled_at: str | None = None,
         priority: int = 5,
         trace_id: str | None = None,
@@ -122,6 +124,10 @@ class OrchestratorClient(BaseClient):
             raise ValueError(
                 f"ação não qualificada: {action!r} — o serviço exige 'plataforma.ação'"
             )
+        if platform:
+            # Última barreira: a ação pode ter sido montada por outro caminho
+            # (retry, replay, painel), e é aqui que ela vira efeito real.
+            assert_same_platform(platform, action)
         body = {
             "action": action,
             "account": account,
@@ -163,67 +169,25 @@ class OrchestratorClient(BaseClient):
 
 
 # =============================================================================
-# Mapeamento de ações
+# Mapeamento de ações → olimpo.integrations.actions
 # =============================================================================
-#: task_type do Olimpo → ação qualificada no orchestrator.
-#: Validado contra o SPEC real do serviço.
-ACTION_MAP: dict[str, str] = {
-    "publish_post": "instagram.post-feed",
-    "publish_story": "instagram.post-story",
-    "publish_reels": "instagram.post-reel",
-    "like": "instagram.like",
-    "comment": "instagram.comment",
-    "follow": "instagram.follow",
-    "unfollow": "instagram.unfollow",
-    "save": "instagram.save-post",
-    "watch_reels": "instagram.watch-reels",
-    "view_stories": "instagram.watch-stories",
-    "send_dm": "instagram.dm",
-    "reply_comment": "instagram.reply",
-    # Recon: a única primitiva de extração real. Só funciona com REELS e
-    # NÃO traz o texto dos comentários — ver docs/06-campanhas.md §3.
-    "extract_content": "instagram.reel-download",
-    "collect_metrics": "instagram.profile-stats",
-}
+# O registro é POR PLATAFORMA e vive em actions.py. Não existe mapa global de
+# propósito: pedir uma ação sem dizer a plataforma é erro de programação, e
+# `instagram.post-feed` despachado para uma conta de WhatsApp é aceito pelo
+# serviço e morre no device sem sinal nenhum.
 
-#: Sem equivalente no serviço hoje. Pedir estes tipos é erro de programação,
-#: não falha de runtime — falhe cedo, no planejamento.
-UNSUPPORTED: dict[str, str] = {
-    "share": (
-        "não existe compartilhar post de feed. Só reels, via "
-        "instagram.reel-action do=[share|story|repost] ou instagram.repost-reel"
-    ),
-    "collect_interactions": (
-        "não existe leitura de comentários ou DMs recebidas. "
-        "profile-stats traz contadores, não conteúdo"
-    ),
-}
-
-#: Ações que NÃO podem ser repetidas cegamente. `like` é toggle: retry
-#: DESCURTE. Publicação repetida duplica post.
-NON_RETRYABLE: frozenset[str] = frozenset({
-    "instagram.post-feed", "instagram.post-reel", "instagram.post-story",
-    "instagram.repost-reel", "instagram.like", "instagram.comment",
-    "instagram.comments", "instagram.reply", "instagram.engage",
-    "instagram.dm", "instagram.reply-story", "instagram.watch-reels",
-    "instagram.watch-stories", "instagram.follow-followers",
-    "instagram.reel-action", "instagram.remove-account",
-})
-
-#: Ações que produzem prova de efeito (data.verified/published/sent).
-#: As demais devolvem data vazio: `ok` é tudo o que se tem.
-HAS_EVIDENCE: frozenset[str] = frozenset({
-    "instagram.post-feed", "instagram.post-reel", "instagram.post-story",
-    "instagram.dm", "instagram.save-post", "instagram.follow",
-    "instagram.unfollow", "instagram.reel-action",
-})
-
-
-def build_params(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+def build_params(platform: str, task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     """Traduz o payload interno para os params do orchestrator.
 
-    Um ponto único de tradução: mudança no contrato externo não se espalha.
+    Recebe a plataforma de propósito: `send_dm` do Instagram e `send_message`
+    do WhatsApp têm formatos diferentes, e adivinhar pelo nome do tipo é como
+    esses erros começam.
     """
+    if platform == "whatsapp":
+        return _whatsapp_params(task_type, payload)
+    if platform == "tiktok":
+        raise PlatformMismatch("TikTok ainda não é suportado pelo orchestrator")
+
     if task_type == "publish_post":
         return {
             "media": payload.get("media_refs", []),
@@ -273,6 +237,36 @@ def build_params(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
         return {"target": payload.get("target_url"), "no_video": True}
     if task_type == "collect_metrics":
         return {"target": payload.get("target_handle")}
+    return dict(payload)
+
+
+def _whatsapp_params(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Params do WhatsApp.
+
+    O alvo aqui é um telefone ou um nome de contato — nunca um @handle. E o
+    conteúdo vai para uma PESSOA REAL: reenvio duplicado não é um post
+    repetido, é alguém recebendo a mesma mensagem duas vezes.
+    """
+    alvo = payload.get("target_phone") or payload.get("target_handle")
+
+    if task_type in {"send_message", "reply_message"}:
+        return {"to": alvo, "text": _sanitize(payload.get("text", ""))}
+    if task_type == "send_file":
+        return {"to": alvo, "file": payload.get("file_ref"),
+                "caption": _sanitize(payload.get("caption", ""))}
+    if task_type == "send_voice":
+        return {"to": alvo, "file": payload.get("file_ref")}
+    if task_type == "forward_message":
+        return {"to": alvo, "message_id": payload.get("message_id")}
+    if task_type in {"read_messages", "chat_summary", "mark_read", "archive_chat"}:
+        return {"chat": alvo}
+    if task_type == "read_inbox":
+        return {"limit": payload.get("limit", 20)}
+    if task_type == "add_contact":
+        return {"phone": alvo, "name": payload.get("name")}
+    if task_type == "send_poll":
+        return {"to": alvo, "question": _sanitize(payload.get("text", "")),
+                "options": payload.get("options", [])}
     return dict(payload)
 
 
