@@ -158,7 +158,7 @@ Quatro FKs são adicionadas via `ALTER TABLE` no fim da migração porque formam
 
 ## 3. Tabelas
 
-Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança.
+Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança → **infraestrutura** ([3.26](#326-infraestrutura-um-servidor-vários-serviços) em diante, migrações 0005/0006).
 
 Convenções desta seção:
 - Todas as colunas `id uuid` usam `DEFAULT uuid_generate_v4()`, exceto `events.id` (`bigserial`).
@@ -226,10 +226,13 @@ A unidade central do sistema: **1 linha = 1 conta de rede social = 1 agente**. T
 
 Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram e no TikTok como duas contas (dois agentes independentes, com memória separada).
 
+> A tabela acima é a da migração 0001. Os campos de **inventário** (`external_id`, `following`, `media_count`, `jid`, `last_synced_at`, `discovered_from`) vieram na 0006 e estão em [3.31](#331-campos-novos-em-accounts-e-account_placements).
+
 **Quando usar / armadilhas.**
 - `active_hours` é `int4range` de **horas inteiras locais**, não `timestamptz`. `[8,23)` = das 08:00 às 22:59. Range que cruza a meia-noite (ex.: madrugada de conta noturna) **não** é representável em um único range — use `[0,3)` + política no código, ou reveja a persona. Isto é uma limitação conhecida do schema v1.
 - `cadence` aqui é o **teto operacional**; `persona_card.cadence` é a **intenção editorial**. Divergiram? O banco vence. O painel deve mostrar os dois.
 - `mood` é jsonb sem schema fixo de propósito: o formato ainda está sendo descoberto na Fase 1/3. Não crie índice nele antes de estabilizar.
+- **`device_binding` é herança e não é fonte da verdade.** Onde a conta vive passou a ser `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representa. Leia dos placements; o campo sobrevive apenas como anotação livre até uma migração de limpeza.
 - Deletar uma `account` cascateia memória, arcos, planos, conteúdo, posts, interações, tasks, aprovações e violações. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste.
 
 ---
