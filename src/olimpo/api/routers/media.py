@@ -14,9 +14,14 @@ from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from olimpo.core.db import session_scope
+from olimpo.media import modelos
+from olimpo.media.servico import PedidoDeFoto
+from olimpo.prompts import photo_studio
+from olimpo.workers.tasks_geracao import enfileirar_foto
 
 router = APIRouter(prefix="/v1/media", tags=["mídia"])
 
@@ -150,3 +155,119 @@ async def identidade(persona_id: UUID) -> dict[str, Any]:
         # geração produz uma pessoa diferente.
         "pode_gerar_com_identidade": bool(p["face_asset_id"]),
     }
+
+
+# =============================================================================
+# Geração
+# =============================================================================
+
+class PedidoDeGeracao(BaseModel):
+    """O que a tela envia. Tudo o mais vem da persona."""
+
+    local: str = "coffee-shop"
+    hora: str = "afternoon"
+    pose: str = "front"
+    stance: str = "standing"
+    expressao: str = "natural"
+    olhar: str = "at-camera"
+    aspect_ratio: str = "9:16"
+    quantidade: int = Field(default=1, ge=1, le=8)
+    wardrobe_item_id: UUID | None = None
+    wardrobe_text: str = ""
+    hairstyle_text: str = ""
+    brand_id: UUID | None = None
+    prop_text: str = ""
+    modelo: str | None = None
+    resolucao: str | None = None
+    #: Semente fixa reproduz o mesmo prompt. Serve para comparar variações
+    #: mudando um parâmetro por vez — algo que a origem não permitia.
+    seed: int | None = None
+
+
+@router.get("/opcoes")
+async def opcoes() -> dict[str, Any]:
+    """Os valores que a tela oferece, vindos do próprio motor de prompt.
+
+    Não são listas escritas à mão na interface: sair de sincronia com o
+    motor produziria um pedido que gera prompt vazio no meio.
+    """
+    return {
+        "locais": list(photo_studio.LOCATION_LABEL.keys()),
+        "horas": list(photo_studio.TIME_ATMO.keys()),
+        "poses": sorted(photo_studio.POSE_MAP.keys()),
+        "expressoes": list(photo_studio.EXPRESSION_MAP.keys()),
+        "modelos": [
+            {"id": m.id, "label": m.label, "resolucoes": list(m.resolucoes)}
+            for m in modelos.IMAGEM.values()
+        ],
+        "aspect_ratios": ["9:16", "4:5", "1:1", "16:9", "3:4"],
+    }
+
+
+@router.post("/personas/{persona_id}/gerar", status_code=202)
+async def gerar(persona_id: UUID, body: PedidoDeGeracao) -> dict[str, Any]:
+    """Enfileira uma geração. Devolve o job para acompanhar.
+
+    Não espera pelo resultado: uma imagem leva de vinte segundos a alguns
+    minutos, e segurar a conexão é como se perde trabalho já pago quando o
+    processo reinicia.
+    """
+    async with session_scope() as s:
+        persona = (await s.execute(text("""
+            SELECT name, face_asset_id FROM personas WHERE id = :id
+        """), {"id": persona_id})).mappings().first()
+    if not persona:
+        raise HTTPException(404, "persona não encontrada")
+    if not persona["face_asset_id"]:
+        raise HTTPException(
+            400,
+            f"{persona['name']} não tem referência de rosto. Sem ela cada "
+            "geração produz uma pessoa diferente — gere o rosto antes.",
+        )
+
+    job_id = await enfileirar_foto(PedidoDeFoto(
+        persona_id=persona_id, **body.model_dump()
+    ))
+    return {"job_id": str(job_id), "status": "queued"}
+
+
+@router.get("/jobs/{job_id}")
+async def estado_do_job(job_id: UUID) -> dict[str, Any]:
+    async with session_scope() as s:
+        job = (await s.execute(text("""
+            SELECT g.*, p.name AS persona_name
+              FROM generation_jobs g
+              LEFT JOIN personas p ON p.id = g.persona_id
+             WHERE g.id = :id
+        """), {"id": job_id})).mappings().first()
+    if not job:
+        raise HTTPException(404, "job não encontrado")
+    return dict(job)
+
+
+@router.get("/jobs")
+async def listar_jobs(
+    persona_id: UUID | None = None,
+    status: str | None = None,
+    limite: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    where, params = [], {"limite": limite}
+    if persona_id:
+        where.append("g.persona_id = :persona_id")
+        params["persona_id"] = persona_id
+    if status:
+        where.append("g.status = CAST(:status AS generation_status)")
+        params["status"] = status
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+
+    async with session_scope() as s:
+        rows = (await s.execute(text(f"""
+            SELECT g.id, g.persona_id, g.kind, g.status, g.progress, g.model,
+                   g.route, g.error, g.created_at, g.finished_at,
+                   g.result_asset_ids, p.name AS persona_name
+              FROM generation_jobs g
+              LEFT JOIN personas p ON p.id = g.persona_id
+              {clause}
+             ORDER BY g.created_at DESC LIMIT :limite
+        """), params)).mappings().all()
+    return {"jobs": [dict(r) for r in rows]}

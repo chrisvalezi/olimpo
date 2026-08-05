@@ -32,6 +32,7 @@ app.conf.update(
         "olimpo.workers.tasks.monitor_*": {"queue": "realtime"},
         "olimpo.workers.tasks.dispatch_*": {"queue": "dispatch"},
         "olimpo.workers.tasks.plan_*": {"queue": "production"},
+        "olimpo.workers.tasks.produce_reconcile_*": {"queue": "maintenance"},
         "olimpo.workers.tasks.produce_*": {"queue": "production"},
         "olimpo.workers.tasks.recon_*": {"queue": "production"},
         "olimpo.workers.tasks.reflect_*": {"queue": "maintenance"},
@@ -41,37 +42,25 @@ app.conf.update(
 )
 
 app.conf.beat_schedule = {
-    # O tick que move o sistema: busca tasks vencidas e despacha.
-    "dispatcher-tick": {
-        "task": "olimpo.workers.tasks.dispatch_due_tasks",
-        "schedule": 30.0,
-    },
-    # Rede falha e webhook se perde: varre tasks presas em voo.
-    "reconciler": {
-        "task": "olimpo.workers.tasks.reconcile_inflight",
-        "schedule": 300.0,
-    },
-    # Monitores 24/7 vencidos (Fase 4).
-    "monitor-tick": {
-        "task": "olimpo.workers.tasks.monitor_due_checks",
-        "schedule": 30.0,
-    },
-    # Plano do dia de cada conta, no início da janela ativa dela.
-    "daily-planning": {
-        "task": "olimpo.workers.tasks.plan_accounts_day",
-        "schedule": 900.0,
-    },
-    # Reflexão noturna: sintetiza o dia em insights e avança o arco.
-    "nightly-reflection": {
-        "task": "olimpo.workers.tasks.reflect_accounts",
-        "schedule": 3600.0,
-    },
-    # Métricas dos posts recentes (janelas de 1h, 24h, 7d).
-    "metrics-collection": {
-        "task": "olimpo.workers.tasks.collect_recent_metrics",
-        "schedule": 1800.0,
+    # Resgata jobs de geração presos em `running` — worker morto no meio.
+    "reconciliar-geracao": {
+        "task": "olimpo.workers.tasks.produce_reconcile_generation",
+        "schedule": 600.0,
     },
 }
 
-# As implementações chegam na Fase 0/1 — ver docs/fases/
+# ⚠️ Agendamento só entra aqui quando a task EXISTE. O beat envia de qualquer
+# jeito e o worker rejeita com KeyError a cada tick, enchendo o log de ruído
+# que esconde erro de verdade. As entradas abaixo esperam a implementação:
+#
+#   dispatcher-tick      olimpo.workers.tasks.dispatch_due_tasks       30s
+#   reconciler           olimpo.workers.tasks.reconcile_inflight      300s
+#   monitor-tick         olimpo.workers.tasks.monitor_due_checks       30s   (Fase 4)
+#   daily-planning       olimpo.workers.tasks.plan_accounts_day       900s
+#   nightly-reflection   olimpo.workers.tasks.reflect_accounts       3600s
+#   metrics-collection   olimpo.workers.tasks.collect_recent_metrics 1800s
+
+from olimpo.workers import tasks_geracao  # noqa: E402,F401
+
+# As demais implementações chegam na Fase 0/1 — ver docs/fases/
 # from olimpo.workers import tasks  # noqa: E402,F401
