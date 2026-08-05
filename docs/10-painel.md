@@ -45,6 +45,8 @@ Ver §8. Kill switch global, promoção de autonomia e aprovação de campanha e
 
 A fila de aprovação é o gargalo humano do sistema em L0/L1. Ela precisa ser operável com as mãos no teclado, sem mouse, a uma taxa de ~1 item a cada 4 segundos quando o conteúdo é rotineiro.
 
+O mesmo vale para a lista de contas, por outro motivo: a operação real tem **milhares** de logins. Toda lista operacional em volume é **paginada e filtrada no banco**, com contagem total visível e ação em lote — nunca "traz tudo e filtra na tela", que derruba o navegador e some com o tempo de resposta.
+
 ---
 
 ## 2. Stack
@@ -82,14 +84,16 @@ panel/
     │   ├── layout.tsx              # shell: sidebar, topbar, provedores, tema escuro
     │   ├── page.tsx                # (1) Visão geral — sala de controle
     │   ├── contas/
-    │   │   ├── page.tsx            # (2) lista + filtros
+    │   │   ├── page.tsx            # (2) tabela densa: busca, facetas, lote
     │   │   └── [id]/
-    │   │       ├── page.tsx        # ficha: visão
-    │   │       ├── persona/page.tsx
+    │   │       ├── page.tsx        # ficha do login: identidade, perfil, onde roda, notas
     │   │       ├── memoria/page.tsx
     │   │       ├── agenda/page.tsx
     │   │       ├── posts/page.tsx
     │   │       └── tasks/page.tsx
+    │   ├── personas/
+    │   │   ├── page.tsx            # (2b) identidades + logins vinculados
+    │   │   └── [id]/page.tsx       # editor do card: modo guiado e modo JSON
     │   ├── aprovacoes/page.tsx     # (3) fila de aprovação
     │   ├── campanhas/
     │   │   ├── page.tsx            # (4) lista
@@ -207,7 +211,7 @@ As contagens vêm **sem filtro aplicado**, numa única consulta agregada: são o
 |---|---|
 | Plataforma | `accounts.platform` |
 | Situação | `accounts.status` (registered · warming · active · paused · suspended · lost) |
-| Presença | calculada dos placements (online · stale · missing · unbound) — [docs/02 § 3.35](02-modelo-de-dados.md#335-situação--presença-dois-eixos-ortogonais) |
+| Presença | calculada dos placements (online · stale · missing · unbound) — [docs/02 § 3.35](02-modelo-de-dados.md#335-situação-e-presença-dois-eixos-ortogonais) |
 | Papel | `accounts.role` (agent · collector · utility) |
 | Arquétipo | `accounts.archetype` (influencer · gossip · clipper · messaging · collector) |
 | Autonomia | `accounts.autonomy` (L0–L3) |
@@ -641,7 +645,7 @@ Um cartão por servidor. Recarrega sozinho a cada 20 s.
 
 **Estado `credencial inválida` tem cor própria.** `401`/`403` não são "fora do ar": o operador conserta credencial, não infraestrutura. Confundir os dois faz reiniciar serviço saudável.
 
-**Contas descobertas.** A varredura do orchestrator encontra contas logadas nos devices que o Olimpo não tem cadastradas. A faixa âmbar oferece importar (todas ou selecionadas). Contas importadas nascem em `draft`/`L0`, já vinculadas ao device e com o inventário real (`external_id`, seguidores, seguindo, publicações, `jid`) — **existem e não agem** até alguém escrever a persona e ativá-las.
+**Contas descobertas.** A varredura do orchestrator encontra contas logadas nos devices que o Olimpo não tem cadastradas. A faixa âmbar oferece importar (todas ou selecionadas). Contas importadas nascem em `registered`/`L0` e **sem persona vinculada**, já ligadas ao device e com o inventário real (`external_id`, seguidores, seguindo, publicações, `jid`) — **existem e não agem** até alguém decidir de quem elas são e liberá-las. Elas aparecem na faceta *sem identidade vinculada* da tela de Contas (§4.2), que é onde essa pendência fica visível em vez de se perder.
 
 **Cadastro.** `Novo servidor` pede nome e endereços; `+ serviço` pede tipo, URL, credencial e TLS, com **sugestões por tipo** (porta, esquema, caminho de saúde, dica). Duas travas: a API recusa orchestrator apontando para `:8077` (é o executor — quem fala com ele tem root no host), e o formulário avisa que o android-manager **não tem chave de API**, só usuário e senha.
 
@@ -760,7 +764,7 @@ Fundo não é preto puro: `#0B0D10`. Preto puro sobre OLED cria halo em texto br
 | `suspended` | suspensa | vermelho | `--st-suspended` `#DC2626` | kill switch — exige ação |
 | `lost` | perdida | vinho apagado | `--st-lost` `#7F1D1D` | banida; fica no sistema de propósito |
 
-**Presença** — o que a *realidade* diz, calculada dos placements ([docs/02 § 3.35](02-modelo-de-dados.md#335-situação--presença-dois-eixos-ortogonais)). Escala própria, **nunca a de situação**, porque são eixos ortogonais e confundi-los é o erro que a tela existe para evitar:
+**Presença** — o que a *realidade* diz, calculada dos placements ([docs/02 § 3.35](02-modelo-de-dados.md#335-situação-e-presença-dois-eixos-ortogonais)). Escala própria, **nunca a de situação**, porque são eixos ortogonais e confundi-los é o erro que a tela existe para evitar:
 
 | Presença | Rótulo na tela | Cor | Leitura |
 |---|---|---|---|
@@ -845,6 +849,7 @@ Regras que valem para as três:
 - Promoção de autonomia é **sempre uma conta por vez**, mesmo com seleção múltipla na lista.
 - Toda ação destrutiva grava `events` com autor, alvo e motivo. Kill switch e mudança de autonomia também geram `guardrail_violations`-adjacente na trilha de auditoria.
 - Rebaixar autonomia e pausar **não** exigem dupla confirmação: o caminho seguro tem que ser o mais barato.
+- **Apagar não existe em lote.** As ações em massa de `/contas` mudam situação, papel, autonomia, rótulos e vínculo de persona — nenhuma delas destrói histórico, e todas são reversíveis. Destruição é sempre uma conta por vez, com digitação.
 
 ---
 
@@ -867,6 +872,8 @@ Regras que valem para as três:
 | **Sem esconder o dry-run** | A faixa âmbar de `DISPATCH_ENABLED=false` não é dispensável, não é discreta e não some com o scroll |
 | **Sem tela exclusiva de um tema** | Claro e escuro têm paridade total de recursos |
 | **Sem persona baseada em pessoa real** — o editor de persona recusa upload de referência facial externa | Princípio inegociável do projeto (`docs/00-visao-geral.md`) |
+| **Sem grade de cartões em lista de contas** | Cartão é ótimo para vinte contas e inútil para quatro mil. Lista operacional em volume é tabela densa, paginada no servidor, com facetas e seleção múltipla (§4.2). Cartão sobra para **personas**, que são dezenas |
+| **Sem apagar conta como caminho normal** | Conta banida vira `perdida`. Apagar destrói o histórico que explica por que ela caiu — e é justamente o histórico que impede repetir o erro |
 
 ---
 
@@ -888,7 +895,7 @@ Regras que valem para as três:
 | Fase | O que o painel ganha |
 |---|---|
 | **0** | Página única read-only: contas, tasks, últimos 100 `events`. Sem ações. Prova o encanamento |
-| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas |
+| **1** | Fila de aprovação completa (L0) com `ApprovalCard`, `ReasoningPanel`, `QAReport` e atalhos · ficha da conta com persona, memória e agenda · pausar/kill · SSE · **tela de Servidores** (§4.10): cadastro de host e serviços, sondagem, devices e importação de contas descobertas · **Contas em tabela densa com facetas e lote, e a tela de Personas** (§4.2) |
 | **2** | Tela de interações · promoção de autonomia com confirmação dupla · aba de amostragem L2 · métricas de post na ficha |
 | **3** | Campanhas inteiras: wizard, `SpreadPolicyEditor`, `ReconViewer`, revisão de plano, timeline de execução · biblioteca de conteúdo |
 | **4** | Monitores 24/7 · fila de revisão dedicada a fofoca com `claim_status` obrigatório e lote proibido |
@@ -908,5 +915,6 @@ Regras que valem para as três:
 - `docs/08-guardrails-e-autonomia.md` — o que cada nível permite e o que a fila precisa bloquear
 - `docs/11-observabilidade.md` — métricas, `events` e `trace_id`
 - `docs/adr/0012-servidor-com-varios-servicos.md` — o modelo por trás da tela de Servidores
+- `docs/adr/0013-persona-separada-da-conta.md` — o modelo por trás das telas de Contas e Personas
 - `docs/contratos/android-manager.md` — o que a frota expõe, e o que ela **não** expõe
 - `db/migrations/0001_initial.sql` — fonte da verdade do schema

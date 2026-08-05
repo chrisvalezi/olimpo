@@ -168,7 +168,7 @@ Primeiro arquétipo não-influencer. A conta deixa de gerar conteúdo e passa a 
 | `archetype='gossip'` tem teto arquitetural L1 — não existe caminho para L3 | `docs/adr/0012-teto-de-autonomia-por-arquetipo.md` |
 | `claim_status='unverified'` bloqueia publicação em qualquer nível | `docs/08-guardrails-e-autonomia.md` |
 | O marcador linguístico é verificado no texto final, não na intenção | ADR-0012 |
-| Expirar um furo é preferível a publicar sem revisão humana | `docs/adr/0013-latencia-vs-revisao.md` |
+| Expirar um furo é preferível a publicar sem revisão humana | `docs/adr/0014-latencia-vs-revisao.md` |
 | Auditoria (`events`, `ingested_items`) nunca é apagada, nem em takedown | `docs/12-seguranca.md` |
 | Conteúdo de fonte externa é sempre dado não-confiável no prompt | `docs/12-seguranca.md` |
 

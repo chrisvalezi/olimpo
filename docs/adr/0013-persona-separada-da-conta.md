@@ -69,7 +69,7 @@ personas                  a identidade: nome, slug, persona_card, memória, arco
 | **Situação** | `accounts.status` | humano e guardrails | *o que queremos que esta conta faça?* |
 | **Presença** | derivada de `account_placements` + `last_seen_in_inventory` | a varredura de inventário | *ela está onde deveria estar?* |
 
-Uma conta pode estar `active` (queremos que opere) e há três dias fora do inventário (não dá). Nenhum dos dois eixos sozinho conta essa história — por isso são dois, e por isso os dois aparecem na mesma linha da tabela. Os valores e o SQL de presença estão em [docs/02 § 3.35](../02-modelo-de-dados.md#335-situação--presença-dois-eixos-ortogonais).
+Uma conta pode estar `active` (queremos que opere) e há três dias fora do inventário (não dá). Nenhum dos dois eixos sozinho conta essa história — por isso são dois, e por isso os dois aparecem na mesma linha da tabela. Os valores e o SQL de presença estão em [docs/02 § 3.35](../02-modelo-de-dados.md#335-situação-e-presença-dois-eixos-ortogonais).
 
 ## Alternativas consideradas
 

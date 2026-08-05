@@ -236,7 +236,7 @@ Tenant. Existe porque clipagem é tipicamente serviço prestado a terceiros, e c
 | `handle` | `text` obrig. | @ da conta, sem o `@` |
 | `platform` | `platform` obrig. | `instagram` \| `tiktok` \| `whatsapp` |
 | `archetype` | `archetype` = `influencer` | Define qual `ContentSource` o loop usa no passo SOURCE |
-| `status` | `account_status` = `registered` | **Situação:** o que *nós* queremos da conta. Era `draft` até a 0007 — ver [3.35](#335-situação--presença-dois-eixos-ortogonais) |
+| `status` | `account_status` = `registered` | **Situação:** o que *nós* queremos da conta. Era `draft` até a 0007 — ver [3.35](#335-situação-e-presença-dois-eixos-ortogonais) |
 | `autonomy` | `autonomy_level` = `L0` | Quanto o agente pode fazer sem humano |
 | `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
 | `persona_card` | `jsonb` = `{}` | **[HERANÇA — removida na 0008]** Use [`personas.persona_card`](#332-personas). Marcada por `COMMENT ON COLUMN` |
@@ -264,7 +264,7 @@ Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram
 - **`device_binding` é herança e não é fonte da verdade.** Onde a conta vive passou a ser `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representa. Leia dos placements; a 0007 marcou a coluna com `COMMENT ON COLUMN` e a 0008 a remove.
 - **`persona_card` também é herança**, pelo mesmo mecanismo e com o mesmo prazo. A janela em que as duas colunas convivem é o custo declarado da [ADR-0013](adr/0013-persona-separada-da-conta.md): uma consulta escrita por hábito lê o card velho e **não falha** — devolve dado desatualizado em silêncio. Ao tocar em qualquer código que leia persona, confira se ele já lê de `personas`.
 - Deletar uma `account` cascateia conteúdo, posts, interações, tasks, aprovações e violações — e **não** apaga memória, arcos nem planos, que desde a 0007 pertencem à persona. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste, e a API exige `confirm=apagar-de-verdade`.
-- **Ausência de inventário não é ausência de conta.** Se todos os logins saírem dos devices, somem os `account_placements`; a conta, a persona, as observações e o histórico continuam. Ver [3.35](#335-situação--presença-dois-eixos-ortogonais).
+- **Ausência de inventário não é ausência de conta.** Se todos os logins saírem dos devices, somem os `account_placements`; a conta, a persona, as observações e o histórico continuam. Ver [3.35](#335-situação-e-presença-dois-eixos-ortogonais).
 
 ---
 
@@ -1117,7 +1117,7 @@ A conta deixa de carregar a identidade e passa a carregar o que é **do login**:
 
 ---
 
-### 3.35 Situação × presença: dois eixos ortogonais
+### 3.35 Situação e presença: dois eixos ortogonais
 
 Duas perguntas diferentes sobre a mesma conta, e é **a divergência entre elas** que o operador precisa enxergar.
 
@@ -1213,7 +1213,7 @@ Define qual implementação de `ContentSource` o passo SOURCE usa. É o único e
 
 ### 4.3 `account_status`
 
-É o eixo da **situação** — o que *nós* queremos. O eixo ortogonal, o da **presença**, está em [3.35](#335-situação--presença-dois-eixos-ortogonais) e não é ENUM: é calculado.
+É o eixo da **situação** — o que *nós* queremos. O eixo ortogonal, o da **presença**, está em [3.35](#335-situação-e-presença-dois-eixos-ortogonais) e não é ENUM: é calculado.
 
 | Valor | Significado |
 |---|---|
@@ -1227,15 +1227,15 @@ Define qual implementação de `ContentSource` o passo SOURCE usa. É o único e
 > **`draft` foi renomeado para `registered` na migração 0007** (`ALTER TYPE account_status RENAME VALUE`). "Draft" não dizia nada a quem opera — sugeria rascunho editável, e o estado real é *cadastrada, existe, e ainda não age*. É o estado em que nascem tanto a conta criada à mão quanto a importada do inventário. Renomear valor de ENUM é atômico no banco e **visível em todo lugar**: código, seed, teste e tela que comparassem com a string `'draft'` deixam de casar.
 
 ```
-registered ─▶ warming ──▶ active ◄──────┐
-                            │          │
-                 ┌──────────┼──────────┤
-                 ▼          ▼          │
-             paused    suspended ──────┘  (retomada exige revisão humana)
-                 │          │
-                 └────┬─────┘
-                      ▼
-                    lost        ◄── terminal
+registered ──▶ warming ──▶ active ◄──────┐
+                              │          │
+                   ┌──────────┼──────────┤
+                   ▼          ▼          │
+               paused    suspended ──────┘  (retomada exige revisão humana)
+                   │          │
+                   └────┬─────┘
+                        ▼
+                      lost        ◄── terminal
 ```
 
 Permitidas: `registered→warming`, `warming→active`, `warming→lost`, `active→paused`, `active→suspended`, `active→lost`, `paused→active`, `paused→lost`, `suspended→active` (só por humano), `suspended→lost`, qualquer → `lost`.
@@ -1562,7 +1562,7 @@ Registradas aqui para não serem redescobertas como bug:
 - **Sem índice em `guardrail_violations (account_id, created_at DESC)`** — a query "violações desta conta" usa `idx_violations_recent` e filtra. Revisar quando a frota crescer.
 - **Sem índice em `content_items (campaign_id)`** — "conteúdo desta campanha" é seq scan.
 - **`llm_calls` sem índice em `trace_id`** — correlacionar chamada de LLM com evento por trace hoje é scan. Candidato imediato quando a auditoria virar rotina.
-- **A presença não é indexável hoje** ([3.35](#335-situação--presença-dois-eixos-ortogonais)). Filtrar por `presence` avalia o `CASE` linha a linha, com subconsultas em `account_placements`. Aceitável na escala atual porque a listagem é paginada; se doer, a saída é materializar a presença numa coluna atualizada pela varredura — ao custo de ela deixar de ser sempre atual.
+- **A presença não é indexável hoje** ([3.35](#335-situação-e-presença-dois-eixos-ortogonais)). Filtrar por `presence` avalia o `CASE` linha a linha, com subconsultas em `account_placements`. Aceitável na escala atual porque a listagem é paginada; se doer, a saída é materializar a presença numa coluna atualizada pela varredura — ao custo de ela deixar de ser sempre atual.
 
 ---
 
@@ -2049,7 +2049,7 @@ Casos específicos deste schema:
 
 - [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade do núcleo
 - [`db/migrations/0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) · [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) — infraestrutura e inventário ([3.26](#326-infraestrutura-um-servidor-vários-serviços))
-- [`db/migrations/0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) — personas, papéis, observações e presença ([3.32](#332-personas) a [3.35](#335-situação--presença-dois-eixos-ortogonais))
+- [`db/migrations/0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) — personas, papéis, observações e presença ([3.32](#332-personas) a [3.35](#335-situação-e-presença-dois-eixos-ortogonais))
 - [ADR-0001](adr/0001-core-proprio.md) — por que core próprio; por que o modelo de dados é nosso
 - [ADR-0012](adr/0012-servidor-com-varios-servicos.md) — por que servidor e serviço são tabelas diferentes
 - [ADR-0013](adr/0013-persona-separada-da-conta.md) — por que a identidade, o login e o lugar onde ele roda são três coisas

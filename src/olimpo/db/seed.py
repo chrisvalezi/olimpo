@@ -83,24 +83,43 @@ LUNA = {
 
 
 def seed() -> int:
+    """Cria a persona Luna Prado e o login de Instagram dela.
+
+    A ordem importa e é a do modelo novo: primeiro a identidade, depois o
+    login. A persona existe mesmo que nenhuma conta exista — ver ADR-0013.
+    """
     with psycopg.connect(settings.sync_database_url) as conn, conn.cursor() as cur:
-        cur.execute("SELECT id FROM accounts WHERE handle = %s", ("@luna.prado",))
+        cur.execute("SELECT id FROM personas WHERE slug = %s", ("luna-prado",))
         if row := cur.fetchone():
             print(f"✓ Já existe: {row[0]}")
             return 0
 
         cur.execute(
             """
+            INSERT INTO personas (name, slug, description, persona_card, notes)
+            VALUES (%s, %s, %s, %s, %s)
+            RETURNING id
+            """,
+            (
+                "Luna Prado", "luna-prado",
+                "personal trainer em Florianópolis",
+                json.dumps(LUNA),
+                "criada pelo seed de desenvolvimento",
+            ),
+        )
+        persona_id = cur.fetchone()[0]  # type: ignore[index]
+
+        cur.execute(
+            """
             INSERT INTO accounts (
-                handle, platform, archetype, status, autonomy,
-                persona_card, cadence, timezone, active_hours, mood
-            ) VALUES (%s,'instagram','influencer','draft','L0',%s,%s,
+                handle, platform, archetype, role, status, autonomy,
+                persona_id, cadence, timezone, active_hours, mood
+            ) VALUES (%s,'instagram','influencer','agent','registered','L0',%s,%s,
                       'America/Sao_Paulo','[7,23)',%s)
             RETURNING id
             """,
             (
-                "@luna.prado",
-                json.dumps(LUNA),
+                "@luna.prado", persona_id,
                 json.dumps({"posts_per_day": 1, "stories_per_day": 3}),
                 json.dumps({"energy": 0.7, "valence": 0.8}),
             ),
@@ -109,19 +128,23 @@ def seed() -> int:
 
         cur.execute(
             """
-            INSERT INTO persona_versions (account_id, version, persona_card, changed_by, change_note)
+            INSERT INTO persona_versions (account_id, version, persona_card,
+                                          changed_by, change_note)
             VALUES (%s, 1, %s, 'seed', 'versão inicial')
             """,
             (account_id, json.dumps(LUNA)),
         )
 
+        # O arco pertence à PERSONA: a personagem tem uma vida só, mesmo que
+        # tenha logins em plataformas diferentes.
         cur.execute(
             """
-            INSERT INTO story_arcs (account_id, title, summary, state, starts_at, active)
-            VALUES (%s,%s,%s,%s,%s,true)
+            INSERT INTO story_arcs (persona_id, account_id, title, summary,
+                                    state, starts_at, active)
+            VALUES (%s,%s,%s,%s,%s,%s,true)
             """,
             (
-                account_id,
+                persona_id, account_id,
                 "Preparação para a meia maratona",
                 "Luna está em bloco de treino de 8 semanas para a meia de novembro. "
                 "Alterna dias bons e dias difíceis; o joelho antigo ainda incomoda.",
@@ -132,12 +155,13 @@ def seed() -> int:
 
         cur.execute(
             "INSERT INTO events (account_id, type, detail) VALUES (%s,'account.seeded',%s)",
-            (account_id, json.dumps({"source": "db.seed"})),
+            (account_id, json.dumps({"source": "db.seed", "persona": str(persona_id)})),
         )
 
         conn.commit()
-        print(f"✓ Criada: @luna.prado  ({account_id})")
-        print("  status=draft — ligue para 'active' quando o device estiver vinculado.")
+        print(f"✓ Persona: Luna Prado ({persona_id})")
+        print(f"✓ Login:   @luna.prado ({account_id})")
+        print("  situação=cadastrada — libere para 'ativa' quando o device estiver vinculado.")
         return 0
 
 
