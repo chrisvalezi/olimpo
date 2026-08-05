@@ -228,6 +228,8 @@ def produzir_ancora(job_id: str) -> dict[str, Any]:
                     job["persona_id"],
                     quantidade=int(pedido.get("quantidade", 3)),
                     seed=pedido.get("seed"), modelo=pedido.get("modelo"),
+                    aspect_ratio=pedido.get("aspect_ratio") or "9:16",
+                    resolucao=pedido.get("resolucao"),
                     referencias_entrada=[
                         identidade.ReferenciaDeEntrada(
                             asset_id=UUID(r["asset_id"]),
@@ -246,13 +248,17 @@ def produzir_ancora(job_id: str) -> dict[str, Any]:
                     cabelo=pedido.get("cabelo", ""),
                     texto_livre=pedido.get("texto_livre", ""),
                     modelo=pedido.get("modelo"),
+                    aspect_ratio=pedido.get("aspect_ratio"),
+                    resolucao=pedido.get("resolucao"),
                     referencias_extras=[
                         UUID(x) for x in (pedido.get("referencias_extras") or [])
                     ],
                 )]
             else:
                 res = await identidade.gerar_ancora(
-                    job["persona_id"], alvo, modelo=pedido.get("modelo")
+                    job["persona_id"], alvo, modelo=pedido.get("modelo"),
+                    aspect_ratio=pedido.get("aspect_ratio"),
+                    resolucao=pedido.get("resolucao"),
                 )
                 assets = [res.asset_id]
         except Exception as exc:

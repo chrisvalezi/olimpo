@@ -174,11 +174,12 @@ Padrão: **`fal-flux`**.
 | `fal-flux` | fal · FLUX.2 | `fal-ai/flux-2/edit` | `fal-ai/flux-2` | — |
 | `fal-nano-pro` | fal · Nano Banana Pro | `fal-ai/nano-banana-pro/edit` | `fal-ai/nano-banana` | 1K, 2K, 4K |
 | `fal-nano` | fal · Nano Banana | `fal-ai/nano-banana/edit` | `fal-ai/nano-banana` | — |
-| `fal-seedream` | fal · Seedream v5 Pro | `…/seedream/v5/pro/edit` | `…/seedream/v5/pro/text-to-image` | 1K, 2K |
-| `fal-seedream-lite` | fal · Seedream v5 Lite | `…/seedream/v5/lite/edit` | `…/seedream/v5/lite/text-to-image` | 2K, 3K, 4K |
+| `fal-seedream` | fal · Seedream v5 Pro | `bytedance/seedream/v5/pro/edit` | `bytedance/seedream/v5/pro/text-to-image` | 1K, 2K |
+| `fal-seedream-lite` | fal · Seedream v5 Lite | `fal-ai/bytedance/seedream/v5/lite/edit` | `fal-ai/bytedance/seedream/v5/lite/text-to-image` | 2K, 3K, 4K |
 
 **Armadilhas de imagem:**
 
+- **O Seedream v5 Pro NÃO leva o prefixo `fal-ai/`; o Lite leva.** Mesma linhagem, mesmo fornecedor, caminhos diferentes — a assimetria é do catálogo do fal. Com o prefixo a resposta é `404 Path /seedream/v5/pro/edit not found`, e isso **não aparece na tela**: o pedido é aceito, vira job, sai da fila e só então falha. Os caminhos sem prefixo estão em `modelos.SEM_PREFIXO_FAL`, e `tests/unit/test_modelos_fal.py` recusa qualquer endpoint que não esteja nem prefixado nem declarado lá. Foi um defeito real: portei o Pro com o prefixo porque todos os vizinhos têm.
 - **FLUX.2 e Seedream não aceitam proporção como enum**, só largura e altura em pixels, arredondadas a múltiplo de 16. Os cálculos (`tamanho_flux`, `tamanho_seedream`, `tamanho_seedream_lite`) foram portados sem alteração: **mudar o arredondamento muda o enquadramento que o modelo produz**.
 - `fal-seedream-lite` **não recebe `output_format`**. A origem não enviava; o comportamento foi preservado e está marcado com `# NOTA:` no código. É um dos "bugs portados de propósito".
 - Proporção fora da lista aceita pelo fal cai em `"auto"` — não em erro. Um aspecto digitado errado gera imagem no formato errado, silenciosamente.
@@ -194,7 +195,7 @@ Padrão: **`kling3-pro`**.
 | `kling3-4k` | Kling v3 4K | 3–15 s | ✅ | usa `start_image_url` |
 | `kling26-pro` | Kling v2.6 Pro | 5, 10 s | ✅ | usa `start_image_url` |
 | `kling25` | Kling v2.5 Turbo Pro | 5, 10 s | — | usa `image_url` (a exceção dentro da família Kling) |
-| `seedance2` | Seedance 2.0 | 4–15 s | ✅ | **recusa rosto fotorrealista** (filtro da ByteDance) |
+| `seedance2` | Seedance 2.0 | 4–15 s | ✅ | **recusa rosto fotorrealista** (filtro da ByteDance) · endpoint **sem** prefixo `fal-ai/` |
 | `seedance1-pro` | Seedance 1 Pro | 2–12 s | — | **recusa rosto fotorrealista** |
 | `hailuo02` | Hailuo 02 | 6, 10 s | — | resoluções `"512P"` / `"768P"` — **P maiúsculo**, e o provider diferencia |
 | `veo3` | Veo 3 | 4, 6, 8 s | ✅ | duração vai como `"8s"`, string com sufixo — não o inteiro `8` |
@@ -301,6 +302,11 @@ Confiar no banco sem checar permitiria que uma linha adulterada lesse qualquer a
 | `GET /v1/media` | Lista paginada (`page`, `per_page` até 200, default 60), com filtros `persona_id`, `role` e `kind`. Devolve `total`, `page` e `pages`; faz `LEFT JOIN` em `personas` para trazer o nome |
 | `GET /v1/media/{id}/arquivo` | Serve o arquivo com cache imutável e validação de path traversal ([§7](#7-armazenamento-de-mídia)) |
 | `GET /v1/media/personas/{id}/identidade` | As âncoras **na ordem**, com quantas existem e se dá para gerar com identidade |
+| `GET /v1/media/opcoes` | O que a tela pode oferecer: locais, horas, poses e expressões vindos do motor, mais o catálogo de modelos com proporções, resoluções e **disponibilidade** ([§8.2](#82-o-catálogo-de-motores)) |
+| `POST /v1/media/personas/{id}/ancoras/{ancora}` | Enfileira a geração. Aceita `modelo`, `aspect_ratio`, `resolucao`; para `face`, também `quantidade`, `seed` e `referencias` com papel declarado ([§8.3](#83-referências-com-papel)) |
+| `DELETE /v1/media/personas/{id}/ancoras/{ancora}` | **Desliga** a âncora sem apagar a imagem — ela volta para a biblioteca como `reference` e pode ser reescolhida. Tirar o rosto devolve `aviso`, porque as outras três derivam dele |
+| `POST` / `DELETE /v1/media/personas/{id}/referencias/{asset_id}` | Anexa e retira do acervo de referência (`personas.reference_asset_ids`). Anexar é idempotente: a mesma foto duas vezes seria a mesma URL duas vezes no array |
+| `POST /v1/media/personas/{id}/figurinos` | Figurino peça a peça — `top`, `bottom`, `calcado`, `cabelo`, `texto_livre` (sobrescreve), mais `referencias_extras` com fotos de peças reais |
 
 ### 8.1 O endpoint de identidade
 
@@ -324,6 +330,47 @@ Confiar no banco sem checar permitiria que uma linha adulterada lesse qualquer a
 - **`posicao` é o que o prompt referencia como `@imageN`.** É por isso que ela é explícita no payload e não implícita na ordem do array.
 - **`completas` importa mais do que *quais*.** Com as quatro, o rosto se mantém entre gerações. Faltando a primeira, não há de onde ancorar — e é isso que `pode_gerar_com_identidade` responde.
 - `extras` são as referências adicionais (`personas.reference_asset_ids`), que entram **depois** das quatro.
+
+### 8.2 O catálogo de motores
+
+`GET /v1/media/opcoes` devolve, por modelo, o que ele aceita **e se ele pode gerar agora**:
+
+```jsonc
+{
+  "id": "fal-seedream", "label": "fal · Seedream v5 Pro", "provider": "fal",
+  "aspectos": ["auto", "21:9", "16:9", …], "resolucoes": ["1K", "2K"],
+  "disponivel": true, "motivo": null
+}
+```
+
+`disponivel` existe porque **a falha por falta de chave acontece longe da tela**: sem ela o pedido é aceito, vira job, sai da fila e só o worker descobre — o operador vê "erro" dez segundos depois, sem dizer o quê. Com ela, o modelo aparece desabilitado dizendo *qual* variável falta (`motivo`).
+
+`aspectos` é por modelo e não global porque nem todo provider aceita a mesma lista: os do fal aceitam onze, e um catálogo com OpenAI aceitaria três. Oferecer 9:16 onde não existe é oferecer um `400`.
+
+A tela consome isso em `panel/components/motor.tsx`, na ordem **modelo → formato → resolução**. A ordem é obrigatória: formato e resolução dependem do modelo, então escolher formato antes seria escolher algo que pode não existir depois. Se o modelo salvo ficar indisponível, o seletor cai sozinho para o primeiro utilizável.
+
+### 8.3 Referências com papel
+
+Ao gerar o **rosto**, a tela envia quantas fotos o operador tiver, cada uma com o papel declarado. O papel não é etiqueta: vira instrução em texto, montada por `prompts/referencias.py`.
+
+| Papel | O que o modelo é instruído a fazer |
+|---|---|
+| `face` | Recriar este rosto. **Com** `physical_desc`, a foto entra só como geometria facial e o texto manda em pele, cabelo e olhos; **sem** ela, a foto é recriada fielmente |
+| `style` | Copiar pose, roupa, cor, cenário e clima — e **ignorar explicitamente** a identidade de quem aparece nela |
+| `extra` | A **mesma** pessoa em outro ângulo ou luz. Sem esse aviso o modelo a leria como outra pessoa, e o rosto derivaria |
+
+O serviço **reordena** para face → style → extra antes de publicar as URLs. Não é arrumação: a instrução gerada fala em *"a primeira imagem"* e *"a segunda"*, então a ordem do array precisa bater com o texto — o mesmo contrato da [§3](#3-consistência-facial--as-quatro-coisas-frágeis), aqui na entrada em vez das âncoras.
+
+### 8.4 Fotos de referência × âncoras
+
+Duas coisas parecidas que **não** são a mesma:
+
+| | Âncoras (4) | Fotos de referência (N) |
+|---|---|---|
+| Onde vivem | Colunas de `personas` | `personas.reference_asset_ids` |
+| Posição no prompt | Fixa — `@image1`…`@image4` | Nenhuma; entram depois |
+| Papel semântico | Sim, cada uma tem o seu | Não |
+| Para que servem | Ser a identidade | Reforçá-la, sobretudo **corpo inteiro** — as âncoras são rosto e closes, então altura e proporção ficam por conta do modelo até existir uma foto de corpo |
 
 ---
 

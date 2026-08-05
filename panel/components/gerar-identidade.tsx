@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import { mutate, urlDaMidia } from "@/lib/api";
 import { Upload_ } from "@/components/upload";
+import { MotorPicker, Motor, motorSalvo, salvarMotor } from "@/components/motor";
 
 /**
  * Geração do rosto — o ponto de partida da identidade.
@@ -37,6 +38,10 @@ const PAPEL = {
   },
 } as const;
 
+//: O rosto vira referência de todo o resto — vertical é o enquadramento
+//: que preserva mais pixels de face por imagem.
+const ROSTO_ASPECTOS = ["9:16", "3:4", "4:5", "1:1"];
+
 type Papel = keyof typeof PAPEL;
 type Ref = { asset_id: string; papel: Papel; nota: string };
 
@@ -52,7 +57,12 @@ export function GerarIdentidade({
   const [refs, setRefs] = useState<Ref[]>([]);
   const [quantidade, setQuantidade] = useState(3);
   const [seed, setSeed] = useState("");
-  const [modelo, setModelo] = useState("");
+  const [motor, setMotor] = useState<Motor>(() => {
+    const m = motorSalvo();
+    // Rosto é sempre vertical: é o enquadramento das três variações e o que
+    // a folha de personagem espera receber depois.
+    return ROSTO_ASPECTOS.includes(m.aspect) ? m : { ...m, aspect: "9:16" };
+  });
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
 
@@ -61,13 +71,16 @@ export function GerarIdentidade({
   async function gerar() {
     setEnviando(true);
     setErro(null);
+    salvarMotor(motor);
     try {
       const r = await mutate(
         `/v1/media/personas/${personaId}/ancoras/face`, "POST",
         {
           quantidade,
           seed: seed ? Number(seed) : null,
-          modelo: modelo || null,
+          modelo: motor.modelo || null,
+          aspect_ratio: motor.aspect || null,
+          resolucao: motor.resolucao,
           referencias: refs,
         },
       );
@@ -201,29 +214,27 @@ export function GerarIdentidade({
         )}
 
         {/* -------------------------------------------------------- opções */}
-        <section className="grid gap-3 sm:grid-cols-3">
+        <MotorPicker valor={motor} onChange={setMotor} aspectos={ROSTO_ASPECTOS} />
+
+        <section className="grid gap-3 sm:grid-cols-2">
           <label className="block">
             <span className="label">variações</span>
             <select className="input" value={quantidade}
               onChange={(e) => setQuantidade(Number(e.target.value))}>
               {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n}</option>)}
             </select>
-          </label>
-          <label className="block">
-            <span className="label">modelo</span>
-            <select className="input" value={modelo}
-              onChange={(e) => setModelo(e.target.value)}>
-              <option value="">padrão</option>
-              <option value="fal-flux">fal · FLUX.2</option>
-              <option value="fal-nano-pro">fal · Nano Banana Pro</option>
-              <option value="fal-seedream">fal · Seedream v5 Pro</option>
-            </select>
+            <span className="mt-0.5 block text-[10px] text-slate-600">
+              cada uma é uma geração cobrada
+            </span>
           </label>
           <label className="block">
             <span className="label">semente</span>
             <input className="input font-mono" placeholder="aleatória"
               value={seed}
               onChange={(e) => setSeed(e.target.value.replace(/\D/g, ""))} />
+            <span className="mt-0.5 block text-[10px] text-slate-600">
+              fixa repete o mesmo sorteio de pose e cenário
+            </span>
           </label>
         </section>
 
@@ -234,7 +245,8 @@ export function GerarIdentidade({
         )}
 
         <div className="flex gap-2 border-t border-surface-border pt-3">
-          <button onClick={gerar} disabled={enviando || semNada} className="btn-primary">
+          <button onClick={gerar} disabled={enviando || semNada || !motor.modelo}
+            className="btn-primary">
             {enviando
               ? <><Loader2 size={14} className="animate-spin" /> enfileirando…</>
               : <><Sparkles size={14} /> gerar {quantidade} variaç{quantidade > 1 ? "ões" : "ão"}</>}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import useSWR from "swr";
 import {
   AlertTriangle, ImageOff, Info, Sparkles, Loader2, Check, Shirt, Plus, X,
@@ -10,6 +10,8 @@ import { api, mutate, urlDaMidia } from "@/lib/api";
 import { Upload_ } from "@/components/upload";
 import { GerarIdentidade } from "@/components/gerar-identidade";
 import { GerarFigurino } from "@/components/gerar-figurino";
+import { GerarDerivada } from "@/components/gerar-derivada";
+import { FotosDeReferencia } from "@/components/fotos-referencia";
 
 /**
  * Identidade visual: as quatro âncoras.
@@ -34,21 +36,13 @@ export function IdentidadeVisual({ personaId, persona }: {
   const [candidatas, setCandidatas] = useState<string[] | null>(null);
   const [abrirGerador, setAbrirGerador] = useState(false);
   const [ampliada, setAmpliada] = useState<string | null>(null);
+  //: Qual âncora derivada está com o popup aberto. O popup existe porque
+  //: gerar custa: sem ele, cada clique gastava uma geração no modelo que
+  //: estivesse por padrão, sem o operador ver qual era.
+  const [derivada, setDerivada] = useState<string | null>(null);
 
   if (!data) return null;
   const { ancoras, completas, pode_gerar_com_identidade } = data;
-
-  async function gerarDerivada(ancora: string) {
-    setErro(null);
-    try {
-      const r = await mutate(
-        `/v1/media/personas/${personaId}/ancoras/${ancora}`, "POST", {},
-      );
-      setJobs((j) => ({ ...j, [ancora]: r.job_id }));
-    } catch (e) {
-      setErro(String(e).replace("Error: ", ""));
-    }
-  }
 
   async function aposentar(ancora: string) {
     const ehRosto = ancora === "face";
@@ -105,7 +99,7 @@ export function IdentidadeVisual({ personaId, persona }: {
             personaId={personaId}
             temRosto={pode_gerar_com_identidade}
             jobId={jobs[a.papel]}
-            onGerar={() => a.papel === "face" ? setAbrirGerador(true) : gerarDerivada(a.papel)}
+            onGerar={() => a.papel === "face" ? setAbrirGerador(true) : setDerivada(a.papel)}
             onAposentar={() => aposentar(a.papel)}
             onAmpliar={() => a.asset_id && setAmpliada(a.asset_id)}
             onMudou={() => { reload(); setJobs((j) => ({ ...j, [a.papel]: "" })); }}
@@ -130,6 +124,19 @@ export function IdentidadeVisual({ personaId, persona }: {
           onEnfileirado={(jobId) => {
             setAbrirGerador(false);
             setJobs((j) => ({ ...j, face: jobId }));
+          }}
+        />
+      )}
+
+      {derivada && (
+        <GerarDerivada
+          personaId={personaId}
+          ancora={derivada as any}
+          rostoAssetId={ancoras.find((a: any) => a.papel === "face")?.asset_id ?? null}
+          onFechar={() => setDerivada(null)}
+          onEnfileirado={(jobId) => {
+            setJobs((j) => ({ ...j, [derivada]: jobId }));
+            setDerivada(null);
           }}
         />
       )}
@@ -163,10 +170,18 @@ function Ancora({
   );
   const rodando = job && ["queued", "running"].includes(job.status);
 
-  if (job?.status === "done" && job.result_asset_ids?.length) {
+  // Avisar o pai é efeito colateral, e efeito colateral não acontece durante
+  // o render — o React interrompe com "cannot update a component while
+  // rendering a different one", e com razão: a atualização do pai
+  // reinvalidaria este componente no meio da própria renderização.
+  useEffect(() => {
+    if (job?.status !== "done" || !job.result_asset_ids?.length) return;
     if (ehRosto && job.result_asset_ids.length > 1) onCandidatas(job.result_asset_ids);
     else onMudou();
-  }
+    // Só o desfecho do job importa aqui; as funções mudam a cada render do
+    // pai e entrariam em laço se fossem dependências.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job?.status, job?.result_asset_ids?.length]);
 
   return (
     <figure className="group space-y-1.5">
@@ -210,7 +225,10 @@ function Ancora({
       <figcaption className="text-[11px] leading-tight text-slate-400">
         {ancora.rotulo}
         {ancora.detalhe && (
-          <span className="block text-[10px] text-slate-600">
+          <span className="block font-mono text-[10px] text-slate-600">
+            {ancora.detalhe.width
+              ? `${ancora.detalhe.width}×${ancora.detalhe.height} · `
+              : ""}
             {Math.round(ancora.detalhe.bytes / 1024)} KB
           </span>
         )}
@@ -342,10 +360,14 @@ export function Figurinos({ personaId, persona }: {
 
   const { data: estado } = useSWR(job ? `/v1/media/jobs/${job}` : null, api,
     { refreshInterval: 3_000 });
-  if (estado && ["done", "error"].includes(estado.status) && job) {
+
+  // Mesmo motivo do bloco em `Ancora`: limpar o job é efeito, não render.
+  useEffect(() => {
+    if (!job || !estado || !["done", "error"].includes(estado.status)) return;
     setJob(null);
     if (estado.status === "done") reload();
-  }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [estado?.status]);
 
   const figurinos = data?.figurinos ?? [];
 

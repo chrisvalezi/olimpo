@@ -7,6 +7,7 @@ import useSWR from "swr";
 import { api, mutate } from "@/lib/api";
 import { PLATAFORMA, STATUS, tempoRelativo } from "@/lib/contas";
 import { IdentidadeVisual, Figurinos, GaleriaDaPersona } from "@/components/identidade-visual";
+import { FotosDeReferencia } from "@/components/fotos-referencia";
 
 /** Blocos do persona card com edição guiada. O card é maior que isto — o
  *  resto continua acessível pelo editor JSON. Ver docs/04-persona-card-spec.md. */
@@ -155,6 +156,10 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
       </section>
 
       <IdentidadeVisual personaId={id} persona={persona} />
+
+      {/* Abaixo das âncoras porque é essa a hierarquia: sem rosto estas não
+          salvam nada, e com rosto elas melhoram toda geração. */}
+      <FotosDeReferencia personaId={id} />
 
       <Figurinos personaId={id} persona={persona} />
 

@@ -8,6 +8,20 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 ## [Não lançado]
 
+### Adicionado
+
+**Escolha do motor em toda geração** — seletor único (`panel/components/motor.tsx`) na ordem modelo → formato → resolução, alimentado por `GET /v1/media/opcoes`. Modelo sem chave aparece desabilitado dizendo qual variável falta, em vez de virar um job que morre no worker dez segundos depois. Proporção e resolução agora chegam ponta a ponta: rosto, âncoras derivadas e figurino.
+
+**Acervo de fotos de referência** — `POST`/`DELETE /v1/media/personas/{id}/referencias/{asset_id}` e a seção correspondente na ficha da persona, abaixo das quatro âncoras. Anexar é idempotente. Serve sobretudo para corpo inteiro: as âncoras são rosto e closes, então altura e proporção ficavam por conta do modelo.
+
+**Dimensões das mídias** — lidas do cabeçalho do arquivo (PNG, JPEG, GIF, WebP) sem trazer Pillow. As colunas `width`/`height` existiam desde a 0001 e nunca tinham sido preenchidas: as 169 imagens do acervo estavam sem. Backfill aplicado, 169/169 reconhecidas.
+
+### Corrigido
+
+**Dois endpoints do fal com prefixo indevido** — `fal-seedream` e `seedance2` respondem em caminho **sem** `fal-ai/`, ao contrário de todos os vizinhos. Portei com o prefixo e o resultado era `404 Path /seedream/v5/pro/edit not found` — que não aparece na tela: o pedido é aceito, enfileira e só falha no worker. Travado em `modelos.SEM_PREFIXO_FAL` + `tests/unit/test_modelos_fal.py`, que recusa endpoint que não esteja nem prefixado nem declarado lá.
+
+**`setState` durante o render** em `identidade-visual.tsx` — o componente da âncora avisava o pai no corpo do render, e o React interrompia com *"cannot update a component while rendering a different one"*. Movido para `useEffect`.
+
 ### A fazer nesta fase (Fase 0 — Fundação)
 - Runner de migrações e aplicação do schema inicial
 - Clientes das integrações com modo dry-run

@@ -197,8 +197,19 @@ async def opcoes() -> dict[str, Any]:
         "horas": list(photo_studio.TIME_ATMO.keys()),
         "poses": sorted(photo_studio.POSE_MAP.keys()),
         "expressoes": list(photo_studio.EXPRESSION_MAP.keys()),
+        # Cada motor com o que aceita e se está utilizável. A tela precisa
+        # das três coisas juntas: oferecer um modelo sem chave transforma a
+        # escolha num job que morre no worker dez segundos depois.
         "modelos": [
-            {"id": m.id, "label": m.label, "resolucoes": list(m.resolucoes)}
+            {
+                "id": m.id,
+                "label": m.label,
+                "provider": m.provider,
+                "resolucoes": list(m.resolucoes),
+                "aspectos": list(m.aspectos_aceitos),
+                "motivo": (motivo := modelos.motivo_de_indisponibilidade(m)),
+                "disponivel": motivo is None,
+            }
             for m in modelos.IMAGEM.values()
         ],
         "aspect_ratios": ["9:16", "4:5", "1:1", "16:9", "3:4"],
@@ -336,6 +347,10 @@ class ReferenciaEntrada(BaseModel):
 
 class PedidoDeAncora(BaseModel):
     modelo: str | None = None
+    #: Vazio usa o padrão da âncora, que não é escolha estética — a folha
+    #: de personagem precisa de largura para os 4 painéis.
+    aspect_ratio: str | None = None
+    resolucao: str | None = None
     quantidade: int = Field(default=3, ge=1, le=4)
     seed: int | None = None
     #: Quantas quiser. A ordem é reorganizada no serviço — rosto, estilo,
@@ -384,7 +399,8 @@ async def gerar_ancora(
 
     job_id = await enfileirar_identidade(
         persona_id, ancora, modelo=body.modelo, quantidade=body.quantidade,
-        seed=body.seed,
+        seed=body.seed, aspect_ratio=body.aspect_ratio,
+        resolucao=body.resolucao,
         referencias=[r.model_dump(mode="json") for r in body.referencias],
     )
     return {"job_id": str(job_id), "status": "queued", "ancora": ancora}
@@ -442,6 +458,69 @@ async def definir_ancora(
     return {"ok": True, "ancora": ancora, "asset_id": str(asset_id)}
 
 
+# =============================================================================
+# Fotos de referência
+# =============================================================================
+# Diferentes das quatro âncoras: não têm posição fixa no prompt nem papel
+# semântico. São ângulos e corpo inteiro que entram como reforço em TODA
+# geração — quanto mais a personagem aparece, menos o modelo inventa. Por
+# isso vivem numa lista, não em colunas.
+
+@router.post("/personas/{persona_id}/referencias/{asset_id}", status_code=200)
+async def anexar_referencia(persona_id: UUID, asset_id: UUID) -> dict[str, Any]:
+    """Junta uma foto ao acervo de referência da persona.
+
+    `array_append` com guarda de duplicata em vez de append cego: a mesma
+    foto duas vezes na lista é a mesma URL duas vezes no array de
+    referências, e alguns modelos contam referências para decidir peso.
+    """
+    async with session_scope() as s:
+        if not (await s.execute(
+            text("SELECT 1 FROM media_assets WHERE id = :a"), {"a": asset_id}
+        )).first():
+            raise HTTPException(404, "asset não encontrado")
+
+        atual = (await s.execute(text("""
+            UPDATE personas
+               SET reference_asset_ids = CASE
+                     WHEN :a = ANY(COALESCE(reference_asset_ids, '{}'))
+                       THEN reference_asset_ids
+                     ELSE array_append(COALESCE(reference_asset_ids, '{}'), :a)
+                   END
+             WHERE id = :p
+         RETURNING reference_asset_ids
+        """), {"a": asset_id, "p": persona_id})).scalar()
+        if atual is None:
+            raise HTTPException(404, "persona não encontrada")
+
+        # Marcar o papel é o que faz a galeria separar identidade de
+        # conteúdo — e o que permite reconstruir se a lista for perdida.
+        await s.execute(text("""
+            UPDATE media_assets
+               SET role = 'reference', persona_id = COALESCE(persona_id, :p)
+             WHERE id = :a
+        """), {"a": asset_id, "p": persona_id})
+
+    return {"ok": True, "referencias": [str(i) for i in atual]}
+
+
+@router.delete("/personas/{persona_id}/referencias/{asset_id}", status_code=200)
+async def remover_referencia(persona_id: UUID, asset_id: UUID) -> dict[str, Any]:
+    """Tira a foto do acervo. A imagem continua na biblioteca."""
+    async with session_scope() as s:
+        atual = (await s.execute(text("""
+            UPDATE personas
+               SET reference_asset_ids =
+                     array_remove(COALESCE(reference_asset_ids, '{}'), :a)
+             WHERE id = :p
+         RETURNING reference_asset_ids
+        """), {"a": asset_id, "p": persona_id})).scalar()
+        if atual is None:
+            raise HTTPException(404, "persona não encontrada")
+
+    return {"ok": True, "referencias": [str(i) for i in atual]}
+
+
 class PedidoDeFigurino(BaseModel):
     """Peça a peça, como na origem.
 
@@ -458,6 +537,8 @@ class PedidoDeFigurino(BaseModel):
     #: Sobrescreve os campos acima.
     texto_livre: str = ""
     modelo: str | None = None
+    aspect_ratio: str | None = None
+    resolucao: str | None = None
     #: Fotos de peças reais que a personagem deve vestir.
     referencias_extras: list[UUID] = []
 

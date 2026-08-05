@@ -4,6 +4,7 @@ import { useState } from "react";
 import { X, Sparkles, Loader2, AlertTriangle, Plus, Trash2, Shirt } from "lucide-react";
 import { mutate, urlDaMidia } from "@/lib/api";
 import { Upload_ } from "@/components/upload";
+import { MotorPicker, Motor, motorSalvo, salvarMotor } from "@/components/motor";
 
 /**
  * Gerador de figurino.
@@ -25,6 +26,10 @@ const EXEMPLOS: Record<string, { f: string; m: string }> = {
   cabelo: { f: "coque baixo", m: "penteado para trás" },
 };
 
+//: O figurino sai em folha de 4 painéis lado a lado. Estreitar espreme
+//: cada painel, e o modelo passa a cortar corpo para caber.
+const FIGURINO_ASPECTOS = ["16:9", "3:2", "4:3"];
+
 export function GerarFigurino({
   personaId, genero, onFechar, onEnfileirado,
 }: {
@@ -36,7 +41,10 @@ export function GerarFigurino({
   const [f, setF] = useState({
     nome: "", top: "", bottom: "", calcado: "", cabelo: "", texto_livre: "",
   });
-  const [modelo, setModelo] = useState("");
+  const [motor, setMotor] = useState<Motor>(() => {
+    const m = motorSalvo();
+    return FIGURINO_ASPECTOS.includes(m.aspect) ? m : { ...m, aspect: "16:9" };
+  });
   const [pecas, setPecas] = useState<string[]>([]);
   const [erro, setErro] = useState<string | null>(null);
   const [enviando, setEnviando] = useState(false);
@@ -51,10 +59,17 @@ export function GerarFigurino({
   async function gerar() {
     setEnviando(true);
     setErro(null);
+    salvarMotor(motor);
     try {
       const r = await mutate(
         `/v1/media/personas/${personaId}/figurinos`, "POST",
-        { ...f, modelo: modelo || null, referencias_extras: pecas },
+        {
+          ...f,
+          modelo: motor.modelo || null,
+          aspect_ratio: motor.aspect || null,
+          resolucao: motor.resolucao,
+          referencias_extras: pecas,
+        },
       );
       onEnfileirado(r.job_id);
     } catch (e) {
@@ -149,16 +164,7 @@ export function GerarFigurino({
           </Upload_>
         </section>
 
-        <label className="block">
-          <span className="label">Modelo</span>
-          <select className="input" value={modelo}
-            onChange={(e) => setModelo(e.target.value)}>
-            <option value="">padrão</option>
-            <option value="fal-flux">fal · FLUX.2</option>
-            <option value="fal-nano-pro">fal · Nano Banana Pro</option>
-            <option value="fal-seedream">fal · Seedream v5 Pro</option>
-          </select>
-        </label>
+        <MotorPicker valor={motor} onChange={setMotor} aspectos={FIGURINO_ASPECTOS} />
 
         {erro && (
           <p className="flex items-start gap-1 text-xs text-red-300">
@@ -167,7 +173,8 @@ export function GerarFigurino({
         )}
 
         <div className="flex gap-2 border-t border-surface-border pt-3">
-          <button onClick={gerar} disabled={enviando || vazio} className="btn-primary">
+          <button onClick={gerar} disabled={enviando || vazio || !motor.modelo}
+            className="btn-primary">
             {enviando
               ? <><Loader2 size={14} className="animate-spin" /> enfileirando…</>
               : <><Sparkles size={14} /> gerar figurino</>}

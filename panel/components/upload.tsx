@@ -28,19 +28,28 @@ export type ResultadoUpload = { asset_id: string; papel: string };
  * base64 dentro de JSON inflaria em um terço sem ganho nenhum.
  */
 export function Upload_({
-  personaId, papel = "reference", rotulo, aoEnviar, compacto = false, children,
+  personaId, papel = "reference", rotulo, aoEnviar, compacto = false,
+  multiplo = false, children,
 }: {
   personaId?: string;
   papel?: string;
   rotulo?: string;
   aoEnviar?: (r: ResultadoUpload) => void;
   compacto?: boolean;
+  /** Vários arquivos numa tacada. Enviados em série, não em paralelo: o
+   *  destino grava por hash e uploads simultâneos do mesmo arquivo
+   *  disputariam a mesma linha. */
+  multiplo?: boolean;
   children?: React.ReactNode;
 }) {
   const input = useRef<HTMLInputElement>(null);
   const [enviando, setEnviando] = useState(false);
   const [sobre, setSobre] = useState(false);
   const [erro, setErro] = useState<string | null>(null);
+
+  async function enviarVarios(arquivos: FileList | File[]) {
+    for (const a of Array.from(arquivos)) await enviar(a);
+  }
 
   async function enviar(arquivo: File) {
     setEnviando(true);
@@ -77,8 +86,8 @@ export function Upload_({
         onDrop={(e) => {
           e.preventDefault();
           setSobre(false);
-          const a = e.dataTransfer.files?.[0];
-          if (a) enviar(a);
+          const fs = e.dataTransfer.files;
+          if (fs?.length) multiplo ? enviarVarios(fs) : enviar(fs[0]);
         }}
         className={`flex cursor-pointer items-center justify-center gap-2 rounded border border-dashed transition-colors ${
           compacto ? "px-2 py-1.5 text-xs" : "px-3 py-6 text-sm"
@@ -102,9 +111,10 @@ export function Upload_({
         type="file"
         accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime,video/webm"
         className="hidden"
+        multiple={multiplo}
         onChange={(e) => {
-          const a = e.target.files?.[0];
-          if (a) enviar(a);
+          const fs = e.target.files;
+          if (fs?.length) multiplo ? enviarVarios(fs) : enviar(fs[0]);
         }}
       />
 
