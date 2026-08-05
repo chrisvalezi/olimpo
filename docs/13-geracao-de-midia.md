@@ -65,6 +65,7 @@ O princípio geral do projeto é que **todo tráfego de modelo passa pelo LiteLL
 |---|---|---|
 | texto → texto | gateway | ✅ já em uso (plano do dia, caption, QA) |
 | texto → imagem | gateway | ✅ 14 modelos fal registrados, incluindo o seedream |
+| imagem OpenAI (`gpt-image-*`) | direto | ⚠️ o gateway não expõe `/images/edits`, e a resposta em base64 não cabe no formato dele |
 | **imagem + referência → imagem** | **direto** | ⚠️ o gateway não expõe endpoint de edição |
 | texto/imagem → vídeo | direto | ⚠️ nenhum modelo de vídeo registrado no gateway |
 | voz | direto | ⚠️ idem |
@@ -174,11 +175,15 @@ Padrão: **`fal-flux`**.
 | `fal-flux` | fal · FLUX.2 | `fal-ai/flux-2/edit` | `fal-ai/flux-2` | — |
 | `fal-nano-pro` | fal · Nano Banana Pro | `fal-ai/nano-banana-pro/edit` | `fal-ai/nano-banana` | 1K, 2K, 4K |
 | `fal-nano` | fal · Nano Banana | `fal-ai/nano-banana/edit` | `fal-ai/nano-banana` | — |
+| `openai-gpt-image-2` | OpenAI · GPT Image 2 | `gpt-image-2` (API própria) | `gpt-image-2` | low, medium, high |
+| `fal-gpt-image-2` | fal · GPT Image 2 | `openai/gpt-image-2/edit` | `fal-ai/gpt-image-2` | low, medium, high |
 | `fal-seedream` | fal · Seedream v5 Pro | `bytedance/seedream/v5/pro/edit` | `bytedance/seedream/v5/pro/text-to-image` | 1K, 2K |
 | `fal-seedream-lite` | fal · Seedream v5 Lite | `fal-ai/bytedance/seedream/v5/lite/edit` | `fal-ai/bytedance/seedream/v5/lite/text-to-image` | 2K, 3K, 4K |
 
 **Armadilhas de imagem:**
 
+- **O `gpt-image-2` está registrado duas vezes de propósito**, uma por caminho. Não é redundância nem indecisão: o direto vai para a conta da OpenAI sem intermediário; o do fal cai na mesma fatura e no mesmo cliente das outras gerações, e dispensa manter uma segunda chave viva. Os parâmetros são os mesmos nos dois — a escolha é de conta, não de capacidade. Detalhes do caminho direto na [§4.4](#44-o-caminho-direto-da-openai).
+- **`input_fidelity` NÃO existe no `gpt-image-2`.** É do `gpt-image-1`, e a armadilha é que sondar o parâmetro sozinho engana: a API valida o *enum* (`Supported values are: 'high' and 'low'`) **antes** de checar se o modelo aceita o parâmetro. Só na geração real vem `The model 'gpt-image-2' does not support the 'input_fidelity' parameter`. Por isso o registro tem `suporta_fidelidade`, e o provider só envia quando declarado.
 - **O Seedream v5 Pro NÃO leva o prefixo `fal-ai/`; o Lite leva.** Mesma linhagem, mesmo fornecedor, caminhos diferentes — a assimetria é do catálogo do fal. Com o prefixo a resposta é `404 Path /seedream/v5/pro/edit not found`, e isso **não aparece na tela**: o pedido é aceito, vira job, sai da fila e só então falha. Os caminhos sem prefixo estão em `modelos.SEM_PREFIXO_FAL`, e `tests/unit/test_modelos_fal.py` recusa qualquer endpoint que não esteja nem prefixado nem declarado lá. Foi um defeito real: portei o Pro com o prefixo porque todos os vizinhos têm.
 - **FLUX.2 e Seedream não aceitam proporção como enum**, só largura e altura em pixels, arredondadas a múltiplo de 16. Os cálculos (`tamanho_flux`, `tamanho_seedream`, `tamanho_seedream_lite`) foram portados sem alteração: **mudar o arredondamento muda o enquadramento que o modelo produz**.
 - `fal-seedream-lite` **não recebe `output_format`**. A origem não enviava; o comportamento foi preservado e está marcado com `# NOTA:` no código. É um dos "bugs portados de propósito".
@@ -212,6 +217,27 @@ Padrão: **`kling3-pro`**.
 | Lipsync | `fal-ai/sync-lipsync/v2` | |
 | Avatar falante | `fal-ai/bytedance/omnihuman` · `fal-ai/kling-video/v1/pro/ai-avatar` | imagem + áudio → vídeo com sincronia labial numa geração só; mais barato que gerar mudo e sincronizar depois |
 | Prova de roupa virtual | `fal-ai/fashn/tryon/v1.6` | copia um look real para a persona (ver `prompts/copiar_look.py`) |
+
+### 4.4 O caminho direto da OpenAI
+
+`olimpo/media/providers/openai.py`. Três coisas o separam do cliente fal:
+
+**A resposta vem em base64, sempre.** Os modelos `gpt-image-*` não aceitam `response_format` — o parâmetro foi removido da API (`Unknown parameter: 'response_format'`). Por isso `GeneratedAsset` ganhou `conteudo`/`mime` e o armazenamento ganhou `guardar_gerado()`, que decide entre baixar de uma URL e gravar bytes. Quem chama não precisa saber de qual dos dois veio.
+
+**A referência vai por multipart.** Não é lista JSON de URLs: são os bytes, em `image[]` repetido. Como consequência, este caminho **dispensa** o upload para o armazenamento do fal descrito na [§7](#7-armazenamento-de-mídia) — as imagens são lidas e enviadas direto.
+
+**O tamanho é calculado, não escolhido de um enum.** Limites verificados contra a API, não presumidos:
+
+| Regra | Valor | Como se manifesta |
+|---|---|---|
+| Múltiplo de 16 | largura **e** altura | `Width and height must both be divisible by 16` |
+| Borda máxima | 3840 | `The longest edge must be less than or equal to 3840` |
+| Área mínima | 655.360 px | `below the current minimum pixel budget` |
+| Área máxima | 8.294.400 px | idem, no outro extremo |
+
+`tamanho_gpt_image()` mira ~1 MP e tem guarda de piso: proporção extrema com área baixa cairia abaixo do mínimo, e o erro só apareceria no worker. A faixa foi confirmada por dois caminhos independentes — sondagem da API (768×768 recusado, 832×832 aceito) e a documentação do fal para o mesmo modelo (655.360), que caem na mesma janela.
+
+**Saída em JPEG, não no PNG padrão.** O mesmo close saiu com 1,5 MB em PNG contra 210 KB em JPEG. O peso não fica só no disco: as âncoras são reenviadas como referência em **toda** geração, então ele volta em cada chamada.
 
 ---
 

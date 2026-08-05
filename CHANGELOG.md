@@ -16,6 +16,8 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 **Dimensões das mídias** — lidas do cabeçalho do arquivo (PNG, JPEG, GIF, WebP) sem trazer Pillow. As colunas `width`/`height` existiam desde a 0001 e nunca tinham sido preenchidas: as 169 imagens do acervo estavam sem. Backfill aplicado, 169/169 reconhecidas.
 
+**GPT Image 2, pelos dois caminhos** — `openai-gpt-image-2` (API própria da OpenAI, cliente novo em `media/providers/openai.py`) e `fal-gpt-image-2` (hospedado no fal). Registrado duas vezes de propósito: os parâmetros são os mesmos, a escolha é de conta e fatura. O caminho direto exigiu suporte a resposta em bytes — os modelos `gpt-image-*` respondem sempre em base64 e não aceitam `response_format`, então `GeneratedAsset` ganhou `conteudo`/`mime` e o armazenamento ganhou `guardar_gerado()`. Saída em JPEG em vez do PNG padrão: 210 KB contra 1,5 MB no mesmo close, e esse peso volta em toda geração porque as âncoras são reenviadas como referência.
+
 ### Corrigido
 
 **Dois endpoints do fal com prefixo indevido** — `fal-seedream` e `seedance2` respondem em caminho **sem** `fal-ai/`, ao contrário de todos os vizinhos. Portei com o prefixo e o resultado era `404 Path /seedream/v5/pro/edit not found` — que não aparece na tela: o pedido é aceito, enfileira e só falha no worker. Travado em `modelos.SEM_PREFIXO_FAL` + `tests/unit/test_modelos_fal.py`, que recusa endpoint que não esteja nem prefixado nem declarado lá.

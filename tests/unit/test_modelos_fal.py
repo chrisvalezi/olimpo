@@ -17,10 +17,35 @@ from olimpo.media import modelos
 
 
 def _endpoints() -> list[tuple[str, str]]:
-    saida = [(m.id, m.edit) for m in modelos.IMAGEM.values()]
-    saida += [(m.id, m.t2i) for m in modelos.IMAGEM.values() if m.t2i]
-    saida += [(m.id, m.endpoint) for m in modelos.VIDEO.values()]
+    """Só os do fal.
+
+    A regra de prefixo é do catálogo do fal. Um modelo da OpenAI declara o
+    nome do modelo (`gpt-image-2`), não um caminho de endpoint — exigir
+    `fal-ai/` dele seria aplicar a regra do lugar errado.
+    """
+    saida = [(m.id, m.edit) for m in modelos.IMAGEM.values() if m.provider == "fal"]
+    saida += [
+        (m.id, m.t2i) for m in modelos.IMAGEM.values()
+        if m.provider == "fal" and m.t2i
+    ]
+    saida += [
+        (m.id, m.endpoint) for m in modelos.VIDEO.values() if m.provider == "fal"
+    ]
     return saida
+
+
+def test_modelo_openai_nao_finge_ser_endpoint_fal() -> None:
+    """O que a OpenAI recebe é nome de modelo, não caminho.
+
+    Mandar `fal-ai/gpt-image-2` para a API da OpenAI é um 400 de modelo
+    inexistente — e a distinção é fácil de perder porque os dois campos se
+    chamam `edit`.
+    """
+    for m in modelos.IMAGEM.values():
+        if m.provider != "openai":
+            continue
+        assert "/" not in m.edit, f"{m.id}: {m.edit!r} parece caminho, não modelo"
+        assert not m.edit.startswith("fal-ai"), m.id
 
 
 @pytest.mark.parametrize(("ident", "endpoint"), _endpoints())
