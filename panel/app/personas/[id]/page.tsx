@@ -2,64 +2,30 @@
 
 import { useState, use, useEffect } from "react";
 import Link from "next/link";
-import { ArrowLeft, Save, Plus, Code2, User, Link2 } from "lucide-react";
+import { ArrowLeft, Save, Code2, User } from "lucide-react";
 import useSWR from "swr";
 import { api, mutate } from "@/lib/api";
-import { PLATAFORMA, STATUS, tempoRelativo } from "@/lib/contas";
-import { IdentidadeVisual, Figurinos, GaleriaDaPersona } from "@/components/identidade-visual";
+import { tempoRelativo } from "@/lib/contas";
+import { IdentidadeVisual, Figurinos } from "@/components/identidade-visual";
 import { FotosDeReferencia } from "@/components/fotos-referencia";
+import { MidiasDaPersona } from "@/components/midias-da-persona";
+import { PersonaFicha } from "@/components/persona-ficha";
+import { PersonaLogins } from "@/components/persona-logins";
+import { Abas } from "@/components/abas";
 
-/** Blocos do persona card com edição guiada. O card é maior que isto — o
- *  resto continua acessível pelo editor JSON. Ver docs/04-persona-card-spec.md. */
-const BLOCOS: { chave: string; titulo: string; ajuda: string;
-                campos: { k: string; rotulo: string; lista?: boolean; area?: boolean }[] }[] = [
-  {
-    chave: "identity", titulo: "Identidade", ajuda: "quem ela é, de fachada",
-    campos: [
-      { k: "name", rotulo: "Nome" },
-      { k: "occupation", rotulo: "Ocupação" },
-      { k: "location", rotulo: "Localização" },
-      { k: "language", rotulo: "Idioma" },
-    ],
-  },
-  {
-    chave: "voice", titulo: "Voz",
-    ajuda: "o bloco que mais segura a personagem no lugar — os exemplos são o que a LLM imita",
-    campos: [
-      { k: "tone", rotulo: "Tom" },
-      { k: "caption_length", rotulo: "Tamanho de caption" },
-      { k: "uses", rotulo: "Gírias que usa", lista: true },
-      { k: "never_uses", rotulo: "Nunca diz", lista: true },
-      { k: "examples", rotulo: "Frases de exemplo", lista: true, area: true },
-    ],
-  },
-  {
-    chave: "visual", titulo: "Visual", ajuda: "sem referência facial fixa ela muda de rosto entre posts",
-    campos: [
-      { k: "canonical", rotulo: "Descrição física", area: true },
-      { k: "face_ref", rotulo: "Referência facial" },
-      { k: "palette", rotulo: "Paleta / estética" },
-      { k: "settings", rotulo: "Cenários", lista: true },
-    ],
-  },
-  {
-    chave: "niche", titulo: "Nicho", ajuda: "",
-    campos: [
-      { k: "primary", rotulo: "Nicho principal" },
-      { k: "audience", rotulo: "Público" },
-      { k: "secondary", rotulo: "Temas secundários", lista: true },
-    ],
-  },
-  {
-    chave: "taboos", titulo: "Tabus", ajuda: "o QA bloqueia conteúdo que viole isto",
-    campos: [
-      { k: "topics", rotulo: "Temas proibidos", lista: true },
-      { k: "banned_words", rotulo: "Palavras banidas", lista: true },
-      { k: "never", rotulo: "Nunca faz", lista: true },
-    ],
-  },
-];
-
+/**
+ * Ficha da persona.
+ *
+ * A ordem da página é uma decisão, não acaso: **identidade visual primeiro**,
+ * como na máquina de influencers. As quatro âncoras são o que define quem a
+ * personagem é — e antes elas ficavam espremidas entre um formulário e
+ * dezenas de campos de persona card, com a galeria de mídias no rodapé,
+ * depois de tudo.
+ *
+ * O resto — ficha, figurinos, mídias, logins — vai para abas. Uma persona
+ * tem campos demais para empilhar: montar tudo de uma vez empurra as imagens
+ * para fora da tela e dispara todas as requisições juntas.
+ */
 export default function FichaDaPersona({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const { data, mutate: reload } = useSWR(`/v1/personas/${id}`, api);
@@ -85,10 +51,6 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
   }, [persona?.id, persona?.updated_at]);
 
   if (!persona || !card || !meta) return <p className="text-sm text-slate-500">carregando…</p>;
-
-  function set(bloco: string, campo: string, valor: any) {
-    setCard({ ...card, [bloco]: { ...(card[bloco] ?? {}), [campo]: valor } });
-  }
 
   async function salvar() {
     setSalvando(true); setErro(null);
@@ -137,108 +99,41 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
 
       {erro && <p className="font-mono text-xs text-red-300">{erro}</p>}
 
-      <section className="card grid gap-3 sm:grid-cols-3">
-        <label className="block">
-          <span className="label">Nome</span>
-          <input className="input" value={meta.name}
-            onChange={(e) => setMeta({ ...meta, name: e.target.value })} />
-        </label>
-        <label className="block">
-          <span className="label">Descrição</span>
-          <input className="input" value={meta.description}
-            onChange={(e) => setMeta({ ...meta, description: e.target.value })} />
-        </label>
-        <label className="block">
-          <span className="label">ID na máquina de influencers</span>
-          <input className="input font-mono" value={meta.persona_engine_id}
-            onChange={(e) => setMeta({ ...meta, persona_engine_id: e.target.value })} />
-        </label>
-      </section>
-
+      {/* ─────────────────────────────────────────────── identidade, no topo
+          Fora das abas de propósito: é o que se olha antes de qualquer outra
+          coisa, e o que precisa estar à mão enquanto se mexe no resto. */}
       <IdentidadeVisual personaId={id} persona={persona} />
 
-      {/* Abaixo das âncoras porque é essa a hierarquia: sem rosto estas não
-          salvam nada, e com rosto elas melhoram toda geração. */}
+      {/* Logo abaixo das âncoras porque é essa a hierarquia: sem rosto elas
+          não salvam nada, e com rosto melhoram toda geração. */}
       <FotosDeReferencia personaId={id} />
 
-      <Figurinos personaId={id} persona={persona} />
-
-      {/* ------------------------------------------------------- logins */}
-      <section className="card space-y-2">
-        <span className="label">Logins desta persona</span>
-        {data.accounts.length === 0 ? (
-          <p className="flex items-center gap-1 text-sm text-slate-500">
-            <Link2 size={12} /> nenhum login vinculado. Vincule pela ficha da
-            conta ou em lote na lista de contas.
-          </p>
-        ) : data.accounts.map((c: any) => {
-          const plat = PLATAFORMA[c.platform] ?? { cor: "", rotulo: c.platform };
-          return (
-            <Link key={c.id} href={`/contas/${c.id}`}
-              className="flex items-center gap-2 rounded border border-surface-border bg-surface/50 px-2.5 py-1.5 text-xs hover:bg-surface-border/30">
-              <span className={`rounded border px-1 py-0.5 text-[10px] ${plat.cor}`}>
-                {plat.rotulo}
-              </span>
-              <span className="text-slate-300">{c.handle}</span>
-              <span className="text-slate-600">{STATUS[c.status]?.rotulo}</span>
-              <span className="text-slate-600">{c.autonomy}</span>
-              <span className="ml-auto font-mono text-slate-500">{c.followers} seg.</span>
-            </Link>
-          );
-        })}
-      </section>
-
-      {/* -------------------------------------------------- persona card */}
-      {json ? (
-        <section className="card space-y-2">
-          <span className="label">Persona card (JSON)</span>
-          <textarea value={texto} onChange={(e) => setTexto(e.target.value)}
-            spellCheck={false}
-            className="input h-[32rem] w-full font-mono text-xs leading-relaxed" />
-        </section>
-      ) : (
-        <div className="grid gap-4 lg:grid-cols-2">
-          {BLOCOS.map((b) => (
-            <section key={b.chave} className="card space-y-3">
-              <div>
-                <span className="label">{b.titulo}</span>
-                {b.ajuda && <p className="text-xs text-slate-600">{b.ajuda}</p>}
-              </div>
-              {b.campos.map((c) => {
-                const valor = card[b.chave]?.[c.k];
-                return (
-                  <label key={c.k} className="block">
-                    <span className="label">{c.rotulo}</span>
-                    {c.lista ? (
-                      <textarea
-                        className={`input ${c.area ? "h-24" : "h-16"} font-mono text-xs`}
-                        placeholder="um por linha"
-                        value={Array.isArray(valor) ? valor.join("\n") : (valor ?? "")}
-                        onChange={(e) => set(b.chave, c.k,
-                          e.target.value.split("\n").map((x) => x.trim()).filter(Boolean))}
-                      />
-                    ) : c.area ? (
-                      <textarea className="input h-16" value={valor ?? ""}
-                        onChange={(e) => set(b.chave, c.k, e.target.value)} />
-                    ) : (
-                      <input className="input" value={valor ?? ""}
-                        onChange={(e) => set(b.chave, c.k, e.target.value)} />
-                    )}
-                  </label>
-                );
-              })}
-            </section>
-          ))}
-        </div>
-      )}
-
-      <GaleriaDaPersona personaId={id} />
-
-      <section className="card space-y-2">
-        <span className="label">Anotação livre</span>
-        <textarea className="input h-20" value={meta.notes}
-          onChange={(e) => setMeta({ ...meta, notes: e.target.value })} />
-      </section>
+      {/* ──────────────────────────────────────────────────────── o resto */}
+      <Abas
+        abas={[
+          {
+            chave: "midias", rotulo: "Mídias",
+            conteudo: () => <MidiasDaPersona personaId={id} />,
+          },
+          {
+            chave: "figurinos", rotulo: "Figurinos",
+            conteudo: () => <Figurinos personaId={id} persona={persona} />,
+          },
+          {
+            chave: "ficha", rotulo: "Ficha",
+            conteudo: () => (
+              <PersonaFicha
+                card={card} meta={meta} json={json} texto={texto}
+                onCard={setCard} onMeta={setMeta} onTexto={setTexto}
+              />
+            ),
+          },
+          {
+            chave: "logins", rotulo: "Logins", contagem: data.accounts.length,
+            conteudo: () => <PersonaLogins contas={data.accounts} />,
+          },
+        ]}
+      />
     </div>
   );
 }

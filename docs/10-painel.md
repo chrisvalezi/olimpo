@@ -282,6 +282,16 @@ Um cartão por persona — e aqui cartão **cabe**, porque personas são dezenas
 
 #### Editor da persona — `/personas/[id]`
 
+**A ordem da página é decisão, não acaso.** Identidade visual primeiro, fora de qualquer aba; o resto — Mídias, Figurinos, Ficha, Logins — em abas abaixo. É a organização da máquina de influencers, e o motivo é a §1.2: as quatro âncoras são o que define quem a personagem *é*, e antes ficavam espremidas entre um formulário e dezenas de campos de persona card, com a galeria de mídias no rodapé, depois de tudo.
+
+As abas não são só arrumação de tela: **o conteúdo da aba inativa não é montado**. Numa persona com centenas de mídias, montar tudo dispara todas as requisições de uma vez.
+
+| Bloco | Onde | Por quê |
+|---|---|---|
+| Identidade visual | topo, fixo | é o que se olha antes de tudo, e o que precisa estar à mão enquanto se mexe no resto |
+| Fotos de referência | logo abaixo, fixo | sem rosto elas não salvam nada; com rosto melhoram toda geração |
+| Mídias · Figurinos · Ficha · Logins | abas | campos demais para empilhar |
+
 O card em dois modos, alternáveis por um botão, editando o **mesmo** objeto.
 
 | Modo | Para quem | Como funciona |
@@ -334,16 +344,21 @@ Identidade visual                                        3 de 4 âncoras
 
 `GET /v1/media/personas/{id}/identidade` · `GET /v1/media/{id}/arquivo`
 
-#### Galeria do conteúdo produzido
+#### Aba Mídias — tudo o que existe da persona
 
-Abaixo do bloco de identidade, o que a persona já produziu: grade paginada de `media_assets`, mais recente primeiro.
+A versão anterior mostrava só `role=generated`, e isso escondia a maior parte do acervo: âncoras, figurinos e fotos de referência ficavam invisíveis. Quem procurava *"aquela foto que eu gerei semana passada"* não tinha onde procurar.
 
 | Elemento | Detalhe |
 |---|---|
-| Filtros | papel (`role`) e tipo (`kind`) — as âncoras aparecem separadas do conteúdo `generated` |
-| Cada item | miniatura, data, modelo e provider usados |
-| Ao abrir | **o prompt exato que gerou aquilo** (`media_assets.prompt`) e as referências usadas, na ordem |
+| Filtros | **todas · identidade · figurinos · produzido · referências**, com contagem ao lado. "identidade" agrupa as quatro âncoras porque é assim que se pensa nelas |
+| Cada item | miniatura com o papel escrito por cima — o papel tem consequência sobre o que a geração faz com a imagem, não é etiqueta |
+| Ao abrir | modelo, provedor, formato, dimensões, tamanho e origem; navegação por setas; **o prompt exato que gerou aquilo** (`media_assets.prompt`) |
+| Apagar | recusado para âncora ligada — `409` dizendo para desligá-la primeiro ([§ identidade](#identidade-visual--bloco-da-ficha-da-persona)) |
 | Paginação | no servidor (`page`, `per_page` até 200) — a mesma disciplina de §4.2 |
+
+**A contagem por papel é da página corrente**, e a tela diz isso. O servidor não devolve agregado por papel, e um número que parece total mas não é vale menos que nenhum.
+
+**Um papel, uma âncora.** Definir uma âncora nova rebaixa a anterior para `reference`. Sem isso o papel passava a mentir: dois assets diziam ser a folha de personagem e só um era apontado pela persona — a galeria contava "identidade 6" numa persona com quatro âncoras.
 
 **O prompt visível é o que fecha o ciclo de auditoria visual.** O equivalente do `ReasoningPanel` para imagem: a pergunta *"por que essa foto saiu assim?"* precisa ter resposta sem `psql`. E `escolhas` do motor de prompt registra cena, horário, pose, prop, look e paleta sorteados — ❓ ainda não exposto na interface.
 

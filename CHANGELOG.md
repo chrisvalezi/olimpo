@@ -22,7 +22,13 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 **As âncoras derivadas passam a usar o acervo de referência** — folha de personagem e closes recebiam só o rosto. As fotos do acervo são a mesma pessoa em outros ângulos e, sobretudo, de corpo inteiro: é o que faltava para a folha de personagem parar de inventar altura e proporção a partir de um retrato. Teto de 10 imagens por geração, com o corte registrado no asset.
 
+**Ficha da persona reorganizada** — identidade visual no topo, fora de abas, como na máquina de influencers; Mídias, Figurinos, Ficha e Logins em abas abaixo. O conteúdo da aba inativa não é montado, então uma persona com centenas de mídias não dispara tudo de uma vez.
+
+**Aba Mídias** — todo o acervo da persona, não só `role=generated` como antes. Filtros por identidade / figurinos / produzido / referências com contagem, visor com modelo, dimensões e o prompt exato, e navegação por setas.
+
 ### Corrigido
+
+**Papel de âncora ficava mentindo** — definir uma âncora nova não rebaixava a anterior, então dois assets diziam ser a folha de personagem e só um era apontado pela persona. Corrigido em `definir_ancora()` e as órfãs existentes foram normalizadas.
 
 **Prompt no singular com várias referências** — os prompts de âncora derivada e de figurino diziam "the reference image" enquanto o código já mandava três. O modelo não tinha como saber que a terceira imagem era uma peça de roupa e não uma pessoa. Agora `montar_instrucao_posicional()` declara o papel de cada uma por posição, com singular e plural escritos separadamente — `"use it to confirm"` com três imagens manda o modelo usar uma só.
 

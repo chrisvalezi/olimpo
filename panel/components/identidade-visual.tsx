@@ -11,7 +11,6 @@ import { Upload_ } from "@/components/upload";
 import { GerarIdentidade } from "@/components/gerar-identidade";
 import { GerarFigurino } from "@/components/gerar-figurino";
 import { GerarDerivada } from "@/components/gerar-derivada";
-import { FotosDeReferencia } from "@/components/fotos-referencia";
 
 /**
  * Identidade visual: as quatro âncoras.
@@ -438,41 +437,6 @@ export function Figurinos({ personaId, persona }: {
           onEnfileirado={(jobId) => { setAbrir(false); setJob(jobId); }}
         />
       )}
-      {ampliada && <Lightbox assetId={ampliada} onFechar={() => setAmpliada(null)} />}
-    </section>
-  );
-}
-
-/** Galeria do que a persona já produziu. */
-export function GaleriaDaPersona({ personaId }: { personaId: string }) {
-  const { data } = useSWR(
-    `/v1/media?persona_id=${personaId}&role=generated&per_page=24`, api,
-    { refreshInterval: 15_000 },
-  );
-  const [ampliada, setAmpliada] = useState<string | null>(null);
-  const midias = data?.media ?? [];
-  if (midias.length === 0) return null;
-
-  return (
-    <section className="card space-y-3">
-      <div className="flex items-center justify-between">
-        <span className="label">Conteúdo produzido</span>
-        <span className="text-xs text-slate-500">{data.total} peças</span>
-      </div>
-      <div className="grid grid-cols-3 gap-2 sm:grid-cols-6">
-        {midias.map((m: any) => (
-          <button key={m.id} onClick={() => setAmpliada(m.id)} title={m.prompt ?? ""}
-            className="group relative aspect-[3/4] overflow-hidden rounded border border-surface-border bg-surface">
-            {m.kind === "video" ? (
-              <video src={urlDaMidia(m.id)} className="h-full w-full object-cover" muted />
-            ) : (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={urlDaMidia(m.id)} alt="" loading="lazy"
-                className="h-full w-full object-cover transition-transform group-hover:scale-105" />
-            )}
-          </button>
-        ))}
-      </div>
       {ampliada && <Lightbox assetId={ampliada} onFechar={() => setAmpliada(null)} />}
     </section>
   );
