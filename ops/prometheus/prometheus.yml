@@ -1,0 +1,277 @@
+# =============================================================================
+# Olimpo — Prometheus
+# =============================================================================
+# Sobe com o profile de observabilidade:  make up-obs
+# (docker compose --profile observability up -d)
+#
+# Monta em /etc/prometheus/prometheus.yml (ver docker-compose.yml).
+# Todos os alvos são resolvidos pelo DNS interno do Compose — os nomes abaixo
+# são NOMES DE SERVIÇO, não localhost. Usar `localhost:8000` aqui aponta para
+# o próprio container do Prometheus.
+#
+# Painéis e alertas: docs/11-observabilidade.md
+#
+# Verificar depois de subir:
+#   http://localhost:9090/targets      → tudo deve estar UP
+#   curl -s localhost:9090/api/v1/targets | jq '.data.activeTargets[].health'
+# =============================================================================
+
+global:
+  # 15 s é o compromisso certo aqui: o dispatcher_tick roda a cada 30 s, então
+  # amostrar mais devagar esconderia picos de fila entre dois ticks.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+  # Rótulos carimbados em toda série — necessários se um dia houver mais de
+  # um ambiente (dev/staging/prod) mandando para o mesmo Grafana.
+  external_labels:
+    projeto: olimpo
+    ambiente: development
+
+# Regras de alerta e de gravação. Arquivos ausentes não impedem o boot.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Alertmanager — descomente quando o serviço existir no compose.
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+scrape_configs:
+
+  # ===========================================================================
+  # 1. O próprio Prometheus
+  # ---------------------------------------------------------------------------
+  # Serve para responder "o Prometheus está coletando?" antes de investigar
+  # qualquer buraco em gráfico.
+  # ===========================================================================
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          camada: observabilidade
+
+  # ===========================================================================
+  # 2. API do core (FastAPI + prometheus-client)
+  # ---------------------------------------------------------------------------
+  # Métricas do domínio, não só de HTTP:
+  #   olimpo_tasks_by_status{status}          — fila do dispatcher
+  #   olimpo_guardrail_violations_total{rule,severity}
+  #   olimpo_llm_cost_usd_total{backend,purpose}
+  #   olimpo_dispatch_latency_seconds         — decisão → task verificada
+  #   olimpo_accounts_by_autonomy{level}
+  #
+  # A API exige API_TOKEN em tudo que não seja /health (ver fase-0). O
+  # prometheus.yml NÃO expande variáveis de ambiente, então o token vai por
+  # arquivo:
+  #
+  #   printf '%s' "$API_TOKEN" > ops/prometheus/api_token
+  #   chmod 600 ops/prometheus/api_token
+  #
+  # e monte junto no serviço prometheus do compose:
+  #   - ./ops/prometheus/api_token:/etc/prometheus/api_token:ro
+  #
+  # Se /metrics for liberado sem auth na rede interna, apague o bloco
+  # `authorization` — é a única coisa que precisa mudar.
+  # ===========================================================================
+  - job_name: olimpo-api
+    metrics_path: /metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/api_token
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          camada: core
+          componente: api
+
+  # ===========================================================================
+  # 3. LLM Gateway (LiteLLM)
+  # ---------------------------------------------------------------------------
+  # litellm_requests_metric_total{model,api_base}
+  # litellm_spend_metric_total          — gasto por modelo/chave
+  # litellm_request_total_latency_metric_bucket
+  # litellm_deployment_state            — 0 saudável / 1 parcial / 2 fora
+  #
+  # O `litellm_deployment_state` é a métrica que revela o modo de falha mais
+  # caro do sistema: um Mac mini fora do ar não gera erro visível — gera
+  # fatura, porque o fallback manda tudo para API externa em silêncio.
+  # Ver docs/09 §7.2 (consulta 5).
+  #
+  # /metrics exige o master key. Mesmo esquema de arquivo:
+  #   printf '%s' "$LITELLM_MASTER_KEY" > ops/prometheus/litellm_token
+  # ===========================================================================
+  - job_name: litellm
+    metrics_path: /metrics
+    scheme: http
+    authorization:
+      type: Bearer
+      credentials_file: /etc/prometheus/litellm_token
+    static_configs:
+      - targets: ["litellm:4000"]
+        labels:
+          camada: llm
+          componente: gateway
+
+  # ===========================================================================
+  # 4. Postgres  —  requer o serviço `postgres-exporter` no compose
+  # ---------------------------------------------------------------------------
+  #   postgres-exporter:
+  #     image: prometheuscommunity/postgres-exporter:latest
+  #     profiles: [observability]
+  #     environment:
+  #       DATA_SOURCE_NAME: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?sslmode=disable"
+  #     depends_on: [postgres]
+  #
+  # O que importa aqui: conexões saturadas (o worker roda com concorrência 8),
+  # locks longos no dispatcher e crescimento da tabela `events`, que é a que
+  # mais cresce por ser auditoria total.
+  # ===========================================================================
+  - job_name: postgres
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+        labels:
+          camada: dados
+          componente: postgres
+
+  # ===========================================================================
+  # 5. Redis  —  requer o serviço `redis-exporter` no compose
+  # ---------------------------------------------------------------------------
+  #   redis-exporter:
+  #     image: oliver006/redis_exporter:latest
+  #     profiles: [observability]
+  #     environment:
+  #       REDIS_ADDR: "redis://redis:6379"
+  #     depends_on: [redis]
+  #
+  # Redis carrega fila do Celery, locks por conta (não despachar duas ações
+  # do mesmo device) e a chave `olimpo:kill:global`. Latência alta aqui vira
+  # ação duplicada em device real.
+  # ===========================================================================
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+        labels:
+          camada: dados
+          componente: redis
+
+  # ===========================================================================
+  # 6. Celery / filas  —  via Flower (profile: tools)
+  # ---------------------------------------------------------------------------
+  # Flower expõe /metrics nativamente. É como se vê a preempção da fila
+  # `realtime` sobre `production` funcionando na prática (docs/09 §8.1):
+  #   flower_task_runtime_seconds_bucket{queue}
+  #   flower_events_total{type,queue}
+  #   flower_worker_number_of_currently_executing_tasks
+  #
+  # Exige `make up-tools` junto do profile de observabilidade — o alvo fica
+  # DOWN se só o profile observability estiver ativo, o que é esperado.
+  # ===========================================================================
+  - job_name: celery-flower
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["flower:5555"]
+        labels:
+          camada: core
+          componente: worker
+
+  # ===========================================================================
+  # 7. Containers  —  requer cAdvisor no compose
+  # ---------------------------------------------------------------------------
+  #   cadvisor:
+  #     image: gcr.io/cadvisor/cadvisor:latest
+  #     profiles: [observability]
+  #     privileged: true
+  #     volumes:
+  #       - /:/rootfs:ro
+  #       - /var/run:/var/run:ro
+  #       - /sys:/sys:ro
+  #       - /var/lib/docker/:/var/lib/docker:ro
+  #
+  # Intervalo maior: cAdvisor é caro de coletar e ninguém precisa de CPU de
+  # container em resolução de 15 s.
+  # ===========================================================================
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+        labels:
+          camada: infra
+          componente: containers
+    metric_relabel_configs:
+      # cAdvisor emite dezenas de milhares de séries. Guarda só o que se olha.
+      - source_labels: [__name__]
+        regex: "container_(cpu_usage_seconds_total|memory_working_set_bytes|network_(receive|transmit)_bytes_total|fs_usage_bytes)"
+        action: keep
+      # Descarta séries do container raiz (id="/"), que duplicam o host.
+      - source_labels: [id]
+        regex: "/"
+        action: drop
+
+  # ===========================================================================
+  # 8. Host  —  requer node-exporter no compose
+  # ---------------------------------------------------------------------------
+  #   node-exporter:
+  #     image: prom/node-exporter:latest
+  #     profiles: [observability]
+  #     command: ["--path.rootfs=/host"]
+  #     pid: host
+  #     volumes: ["/:/host:ro,rslave"]
+  #
+  # Disco é o alvo real aqui: `media/` (mídia gerada + dryrun/) e o volume do
+  # Postgres enchem sem aviso conforme a frota cresce.
+  # ===========================================================================
+  - job_name: node
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          camada: infra
+          componente: host
+
+  # ===========================================================================
+  # 9. Serviços externos (fora deste compose)
+  # ---------------------------------------------------------------------------
+  # android-orchestrator e máquina de influencers rodam fora da stack. Se
+  # expuserem /metrics, aponte aqui — do container, o host da máquina é
+  # host.docker.internal (o compose já configura extra_hosts no litellm;
+  # adicione o mesmo ao serviço prometheus).
+  #
+  # Estes alvos ficam DOWN até os serviços exporem métricas — é intencional,
+  # não é erro de configuração.
+  # ===========================================================================
+  - job_name: android-orchestrator
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9000"]
+        labels:
+          camada: execucao
+          componente: orchestrator
+
+  - job_name: persona-engine
+    scrape_interval: 30s
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:9100"]
+        labels:
+          camada: servicos
+          componente: persona-engine
+
+  # ===========================================================================
+  # 10. Mac minis (Ollama)  —  requer ollama_exporter ou equivalente
+  # ---------------------------------------------------------------------------
+  # O Ollama não expõe /metrics nativamente. Enquanto não houver exporter, a
+  # visibilidade dos Macs vem indireta, pelo `litellm_deployment_state` e pela
+  # tabela `llm_calls` (docs/09 §7). Este job fica comentado até existir alvo.
+  # ===========================================================================
+  # - job_name: ollama
+  #   scrape_interval: 30s
+  #   static_configs:
+  #     - targets: ["host.docker.internal:11434", "host.docker.internal:11435"]
+  #       labels:
+  #         camada: llm
+  #         componente: ollama

@@ -1,0 +1,62 @@
+[project]
+name = "olimpo"
+version = "0.1.0"
+description = "Core de agentes sociais autônomos"
+requires-python = ">=3.12"
+
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "psycopg[binary]>=3.2",          # migrações (sync)
+    "pgvector>=0.3",
+    "redis>=5.2",
+    "celery[redis]>=5.4",
+    "httpx>=0.28",
+    "tenacity>=9.0",                 # retry nas integrações
+    "structlog>=24.4",
+    "prometheus-client>=0.21",
+    "python-multipart>=0.0.17",
+    "jinja2>=3.1",
+    "croniter>=5.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "respx>=0.22",                   # mock de HTTP nos testes de integração
+    "flower>=2.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+plugins = ["pydantic.mypy"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

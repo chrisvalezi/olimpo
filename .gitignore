@@ -1,0 +1,44 @@
+# --- segredos ----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# --- python ------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+dist/
+build/
+
+# --- node / painel -----------------------------------------------------------
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# --- dados locais ------------------------------------------------------------
+media/
+dryrun/
+storage/
+*.sqlite3
+*.db
+
+# --- ferramentas -------------------------------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+docker-compose.override.yml

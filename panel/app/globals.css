@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Sala de controle: tema escuro é o padrão, não uma opção.
+   Ver docs/10-painel.md (design system). */
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-surface text-slate-200 antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+}
+
+/* Foco sempre visível — o painel é operado por teclado em volume
+   (fila de aprovação). Ver docs/10-painel.md (acessibilidade). */
+:focus-visible {
+  @apply outline-none ring-2 ring-info ring-offset-2 ring-offset-surface;
+}
+
+@layer components {
+  .card {
+    @apply rounded-lg border border-surface-border bg-surface-raised p-4;
+  }
+  .label {
+    @apply text-xs font-medium uppercase tracking-wider text-slate-500;
+  }
+  .metric {
+    @apply font-mono text-2xl font-semibold tabular-nums text-slate-100;
+  }
+}

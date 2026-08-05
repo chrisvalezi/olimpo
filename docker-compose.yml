@@ -1,0 +1,185 @@
+# =============================================================================
+# Olimpo — stack completa
+# =============================================================================
+#   make up            → infra + core + painel
+#   make up-obs        → inclui Prometheus/Grafana (profile: observability)
+#
+# Perfis:
+#   (default)       postgres, redis, litellm, api, worker, beat, panel
+#   observability   prometheus, grafana
+#   tools           adminer, flower
+# =============================================================================
+
+name: olimpo
+
+x-python-common: &python-common
+  build:
+    context: .
+    dockerfile: docker/Dockerfile.api
+  env_file: [.env]
+  environment:
+    DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    REDIS_URL: redis://redis:6379/0
+    LLM_GATEWAY_URL: http://litellm:4000
+  volumes:
+    - ./src:/app/src
+    - ./db:/app/db
+    - media:/app/media
+  depends_on:
+    postgres: {condition: service_healthy}
+    redis:    {condition: service_healthy}
+  restart: unless-stopped
+
+services:
+
+  # ---------------------------------------------------------------- dados ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports: ["${POSTGRES_PORT:-5432}:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes: [redisdata:/data]
+    ports: ["${REDIS_PORT:-6379}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # --------------------------------------------------------------- migrar ---
+  migrate:
+    <<: *python-common
+    command: python -m olimpo.db.migrate up
+    restart: "no"
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # ------------------------------------------------------------ llm gateway -
+  # Roteia entre os 2 Mac minis (Ollama) e as APIs externas.
+  # Config em ops/litellm.config.yaml.
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ./ops/litellm.config.yaml:/app/config.yaml:ro
+    env_file: [.env]
+    ports: ["${LITELLM_PORT:-4000}:4000"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------- core ---
+  api:
+    <<: *python-common
+    command: >
+      uvicorn olimpo.api.main:app --host 0.0.0.0 --port 8000 --reload
+    ports: ["${API_PORT:-8000}:8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis:    {condition: service_healthy}
+      migrate:  {condition: service_completed_successfully}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # Executa as tasks: produção de conteúdo, recon, monitores, dispatch.
+  # Filas separadas por prioridade — interação nunca espera ideação.
+  worker:
+    <<: *python-common
+    command: >
+      celery -A olimpo.workers.app worker
+      --loglevel=INFO
+      --queues=realtime,dispatch,production,maintenance
+      --concurrency=${WORKER_CONCURRENCY:-8}
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  # Tick do sistema. A fonte da verdade do agendamento é o Postgres
+  # (tasks.scheduled_for); o beat só acorda o dispatcher. Ver ADR-0004.
+  beat:
+    <<: *python-common
+    command: celery -A olimpo.workers.app beat --loglevel=INFO
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  # ---------------------------------------------------------------- painel ---
+  panel:
+    build:
+      context: ./panel
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: ${PANEL_API_URL:-http://localhost:8000}
+      NODE_ENV: development
+    volumes:
+      - ./panel:/app
+      - /app/node_modules
+      - /app/.next
+    ports: ["${PANEL_PORT:-3000}:3000"]
+    depends_on: [api]
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ ferramentas -
+  adminer:
+    image: adminer:latest
+    profiles: [tools]
+    ports: ["${ADMINER_PORT:-8080}:8080"]
+    depends_on: [postgres]
+
+  flower:
+    <<: *python-common
+    profiles: [tools]
+    command: celery -A olimpo.workers.app flower --port=5555
+    ports: ["${FLOWER_PORT:-5555}:5555"]
+
+  # --------------------------------------------------------- observabilidade -
+  prometheus:
+    image: prom/prometheus:latest
+    profiles: [observability]
+    volumes:
+      - ./ops/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports: ["${PROMETHEUS_PORT:-9090}:9090"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles: [observability]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-olimpo}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./ops/grafana/provisioning:/etc/grafana/provisioning:ro
+    ports: ["${GRAFANA_PORT:-3001}:3000"]
+    depends_on: [prometheus]
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  redisdata:
+  media:
+  promdata:
+  grafanadata:

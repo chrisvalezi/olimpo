@@ -1,0 +1,368 @@
+# =============================================================================
+# Olimpo — LiteLLM Gateway
+# =============================================================================
+# Roteia TODA chamada de LLM do core entre:
+#   • Mac mini 1 (Ollama)  — volume e baixa latência   → MAC_MINI_1_URL
+#   • Mac mini 2 (Ollama)  — raciocínio e multimodal   → MAC_MINI_2_URL
+#   • Anthropic API        — raciocínio/QA de qualidade → ANTHROPIC_API_KEY
+#   • OpenAI API           — overflow e embeddings de reserva → OPENAI_API_KEY
+#
+# O core NUNCA pede um modelo concreto: pede um ALIAS (olimpo-fast,
+# olimpo-reason, olimpo-vision, olimpo-smart, olimpo-embed). Trocar o modelo
+# de uma tarefa é editar este arquivo — não é deploy de código.
+#
+# Serviço `litellm` no docker-compose.yml, porta 4000, montado em /app/config.yaml.
+# Documentação: docs/09-llm-gateway.md
+#
+# Sanidade rápida:
+#   curl -s localhost:4000/health/liveliness
+#   curl -s localhost:4000/v1/models -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+#   curl -s localhost:4000/v1/chat/completions \
+#        -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+#        -H 'content-type: application/json' \
+#        -d '{"model":"olimpo-fast","messages":[{"role":"user","content":"ping"}]}'
+#
+# ATENÇÃO: os nomes de modelo Ollama abaixo (tags e quantizações) são o ponto
+# de partida do benchmark descrito em docs/09-llm-gateway.md §5.2, não a
+# conclusão dele. Rode `ollama list` nos dois Macs e ajuste as tags antes de
+# subir em produção — uma tag inexistente devolve 404 do Ollama, não erro de
+# boot do LiteLLM.
+# =============================================================================
+
+model_list:
+
+  # ===========================================================================
+  # olimpo-fast — volume e baixa latência
+  # ---------------------------------------------------------------------------
+  # purposes: caption · reply_interaction · classify_interaction ·
+  #           ingest_relevance · campaign_adapt · image_prompt · qa_text
+  #
+  # Peso 4:1 para o Mac mini 1. O Mac 2 é válvula de escape (transbordo),
+  # não par de round-robin: se ele virar par, o raciocínio compete com a
+  # interação em tempo real pela mesma memória e vira swap de pesos.
+  # ===========================================================================
+
+  - model_name: olimpo-fast
+    litellm_params:
+      model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
+      api_base: os.environ/MAC_MINI_1_URL
+      weight: 4                # preferência estrutural pelo Mac 1
+      rpm: 600
+      timeout: 30              # falha rápido → cai para o fallback
+      stream_timeout: 15
+      # Local não tem custo marginal. Zero explícito para não poluir o
+      # controle de budget, que só deve contar API externa.
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac1-fast
+      mode: chat
+      base_model: qwen2.5-7b
+      supports_function_calling: true
+      metadata: "Mac mini 1 · OLLAMA_KEEP_ALIVE=-1 · NUM_PARALLEL=4"
+
+  - model_name: olimpo-fast
+    litellm_params:
+      model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
+      api_base: os.environ/MAC_MINI_2_URL
+      weight: 1                # só transbordo
+      rpm: 60                  # teto baixo: o Mac 2 não pode ser inundado
+      timeout: 30
+      stream_timeout: 15
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac2-fast-overflow
+      mode: chat
+      base_model: qwen2.5-7b
+      metadata: "Mac mini 2 · transbordo apenas"
+
+  # ===========================================================================
+  # olimpo-reason — raciocínio, contexto longo
+  # ---------------------------------------------------------------------------
+  # purposes: plan_day · reflect · clip_detect · memory_summarize
+  #
+  # Timeout longo de propósito: um 14B com 12k de contexto legitimamente
+  # demora. Falhar em 30 s aqui só produz retry caro.
+  # ===========================================================================
+
+  - model_name: olimpo-reason
+    litellm_params:
+      model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
+      api_base: os.environ/MAC_MINI_2_URL
+      rpm: 60
+      timeout: 180
+      stream_timeout: 60
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac2-reason
+      mode: chat
+      base_model: qwen2.5-14b
+      supports_function_calling: true
+      metadata: "Mac mini 2 · KEEP_ALIVE=30m · NUM_PARALLEL=1"
+
+  # ===========================================================================
+  # olimpo-vision — recon multimodal
+  # ---------------------------------------------------------------------------
+  # purpose: recon_analysis (screenshots capturados pelo device Android)
+  #
+  # Entrada de guardrail: o safety_verdict do recon decide se uma campanha
+  # de engajamento acontece. Se o recall de conteúdo arriscado ficar abaixo
+  # de 95% no benchmark, INVERTA a ordem — Anthropic como primário e o
+  # local como fallback. Ver docs/09 §5.1.
+  # ===========================================================================
+
+  - model_name: olimpo-vision
+    litellm_params:
+      model: ollama_chat/qwen2.5vl:7b-q4_K_M
+      api_base: os.environ/MAC_MINI_2_URL
+      rpm: 30
+      timeout: 120
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac2-vision
+      mode: chat
+      base_model: qwen2.5-vl-7b
+      supports_vision: true
+
+  # ===========================================================================
+  # olimpo-smart — qualidade via API externa
+  # ---------------------------------------------------------------------------
+  # purposes: qa_text (segunda opinião em veredito limítrofe) ·
+  #           escalada de plan_day/reflect/recon_analysis
+  #
+  # É o único alias que pode gastar dinheiro em operação normal. A regra R3
+  # de docs/09 §3.1: guardrail nunca é degradado por custo — QA limítrofe
+  # continua escalando aqui mesmo com LLM_DAILY_BUDGET_USD estourado.
+  # Sonnet 5 é o padrão (US$ 3/US$ 15 por 1M tokens); Opus 5 fica no alias
+  # olimpo-smart-max para o que realmente exigir.
+  # ===========================================================================
+
+  - model_name: olimpo-smart
+    litellm_params:
+      model: anthropic/claude-sonnet-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 120
+      timeout: 120
+      max_tokens: 4096
+    model_info:
+      id: anthropic-smart
+      mode: chat
+      supports_vision: true
+      supports_function_calling: true
+
+  - model_name: olimpo-smart-max
+    litellm_params:
+      model: anthropic/claude-opus-5
+      api_key: os.environ/ANTHROPIC_API_KEY
+      rpm: 30
+      timeout: 180
+      max_tokens: 8192
+    model_info:
+      id: anthropic-max
+      mode: chat
+      supports_vision: true
+      metadata: "Caro (US$5/US$25 por 1M). Só decisão de alto valor."
+
+  # ===========================================================================
+  # gpt — overflow quando a Anthropic falha
+  # ===========================================================================
+
+  - model_name: gpt
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 120
+      timeout: 120
+    model_info:
+      id: openai-overflow
+      mode: chat
+      supports_vision: true
+
+  - model_name: gpt-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+      rpm: 300
+      timeout: 60
+    model_info:
+      id: openai-mini
+      mode: chat
+
+  # ===========================================================================
+  # olimpo-embed — embeddings de memória (pgvector, 1024 dimensões)
+  # ---------------------------------------------------------------------------
+  # A dimensão TEM que bater com memories.embedding vector(1024) do schema
+  # (db/migrations/0001_initial.sql). Trocar o modelo de embedding troca o
+  # ESPAÇO VETORIAL: o core marca memories.metadata.embed_model e filtra a
+  # busca por similaridade pelo modelo corrente. Ver docs/09 §3.2.
+  # ===========================================================================
+
+  - model_name: olimpo-embed
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: os.environ/MAC_MINI_1_URL
+      weight: 3
+      rpm: 1200
+      timeout: 15
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac1-embed
+      mode: embedding
+      output_vector_size: 1024
+
+  - model_name: olimpo-embed
+    litellm_params:
+      model: ollama/bge-m3
+      api_base: os.environ/MAC_MINI_2_URL
+      weight: 1
+      rpm: 300
+      timeout: 15
+      input_cost_per_token: 0.0
+      output_cost_per_token: 0.0
+    model_info:
+      id: mac2-embed
+      mode: embedding
+      output_vector_size: 1024
+
+  # Reserva de emergência. ATENÇÃO: 1536 dimensões != 1024 do schema.
+  # O core só usa este deployment com truncagem explícita e marca o
+  # embed_model diferente — nunca se mistura espaço vetorial numa query.
+  - model_name: olimpo-embed-fallback
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
+      dimensions: 1024          # a API da OpenAI aceita reduzir a dimensão
+      rpm: 600
+      timeout: 30
+    model_info:
+      id: openai-embed
+      mode: embedding
+      output_vector_size: 1024
+
+
+# =============================================================================
+# ROTEADOR — balanceamento, fallback, circuit breaker
+# =============================================================================
+
+router_settings:
+
+  # latency-based: dentro de um mesmo alias, o tráfego migra para o
+  # deployment mais rápido ANTES de estourar timeout. O `weight` define a
+  # preferência estrutural; a latência medida faz o ajuste fino.
+  routing_strategy: latency-based-routing
+  routing_strategy_args:
+    ttl: 60                    # janela (s) da média móvel de latência
+
+  # Estado compartilhado entre réplicas do proxy (cooldown, latência, budget).
+  redis_host: redis
+  redis_port: 6379
+  redis_password: ""
+
+  # Checa contexto/parâmetros ANTES de despachar — evita queimar uma
+  # tentativa num deployment que não caberia o prompt.
+  enable_pre_call_checks: true
+
+  # Resiliência
+  num_retries: 2               # tentativas dentro do alias antes do fallback
+  timeout: 60                  # teto global; o timeout do deployment vence se menor
+  allowed_fails: 3             # 3 falhas seguidas tiram o deployment da rotação
+  cooldown_time: 60            # segundos fora de rotação
+  retry_after: 5
+  allowed_fails_policy:
+    # Não punir o backend por erro que é nosso (400) nem por conteúdo (401/403).
+    BadRequestErrorRetries: 0
+    AuthenticationErrorRetries: 0
+    TimeoutErrorRetries: 2
+    RateLimitErrorRetries: 2
+    InternalServerErrorRetries: 2
+
+  # -------------------------------------------------------------------------
+  # Cadeias de fallback (docs/09 §3.2)
+  #   fast   → reason → smart      (interação nunca fica sem destino)
+  #   reason → smart  → gpt
+  #   vision → smart  → gpt        (Claude e GPT são multimodais)
+  #   embed  → embed-fallback      (espaço vetorial diferente: ver acima)
+  # -------------------------------------------------------------------------
+  fallbacks:
+    - olimpo-fast: ["olimpo-reason", "olimpo-smart"]
+    - olimpo-reason: ["olimpo-smart", "gpt"]
+    - olimpo-vision: ["olimpo-smart", "gpt"]
+    - olimpo-smart: ["gpt"]
+    - olimpo-smart-max: ["olimpo-smart", "gpt"]
+    - olimpo-embed: ["olimpo-embed-fallback"]
+
+  # Prompt maior que a janela do modelo local → sobe direto, sem retry inútil.
+  context_window_fallbacks:
+    - olimpo-fast: ["olimpo-reason", "olimpo-smart"]
+    - olimpo-reason: ["olimpo-smart"]
+
+  # Provedor sem cota → não insiste, troca.
+  content_policy_fallbacks:
+    - olimpo-smart: ["gpt"]
+
+
+# =============================================================================
+# COMPORTAMENTO GLOBAL
+# =============================================================================
+
+litellm_settings:
+
+  # Ollama ignora vários parâmetros da API OpenAI. Sem isto, uma chamada
+  # com `seed` ou `response_format` quebra no backend local.
+  drop_params: true
+  set_verbose: false
+  json_logs: true
+
+  # Cache de resposta em Redis. Vale para classificação de comentário e
+  # avaliação de relevância, onde o mesmo texto reaparece (spam em lote,
+  # item ingerido duplicado). TTL curto: persona e memória mudam.
+  cache: true
+  cache_params:
+    type: redis
+    host: redis
+    port: 6379
+    ttl: 600
+    supported_call_types: ["acompletion", "completion", "aembedding", "embedding"]
+
+  # -------------------------------------------------------------------------
+  # TETO DE GASTO — rede de segurança, não caminho normal
+  # -------------------------------------------------------------------------
+  # O controle real de LLM_DAILY_BUDGET_USD vive no core
+  # (olimpo.llm.gateway), que degrada para local em vez de recusar a chamada
+  # — ver docs/09 §3.4. Este teto aqui é o hard stop para o caso de bug no
+  # core: ao ser atingido, o LiteLLM devolve 400 e o core cai no modo
+  # degradado por purpose.
+  #
+  # MANTENHA EM SINCRONIA com LLM_DAILY_BUDGET_USD no .env — o LiteLLM
+  # resolve os.environ/* como string e este campo exige float, então o valor
+  # é literal de propósito. Deixe uma folga de ~20% sobre o teto do core,
+  # para que o soft limit dispare primeiro.
+  # -------------------------------------------------------------------------
+  max_budget: 6.0
+  budget_duration: 1d
+
+  # Métricas para o Prometheus (ops/prometheus/prometheus.yml).
+  # Em builds da imagem sem o módulo enterprise este callback é ignorado com
+  # um warning no boot — o /metrics some, o gateway continua funcionando.
+  callbacks: ["prometheus"]
+
+  # Nunca vazar prompt de persona em log de erro do provedor.
+  turn_off_message_logging: true
+  request_timeout: 180
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+
+  # Sonda ativa: um Mac mini que voltou reentra na rotação sozinho, sem
+  # esperar tráfego real falhar primeiro.
+  background_health_checks: true
+  health_check_interval: 60
+
+  # Não expor a lista completa de deployments em /v1/models: o core só
+  # precisa conhecer os aliases.
+  infer_model_from_keys: false
+  disable_spend_logs: false

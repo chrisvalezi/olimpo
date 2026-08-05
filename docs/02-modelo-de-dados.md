@@ -1,0 +1,1584 @@
+# 02 — Modelo de dados
+
+> Fonte da verdade: [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql).
+> Este documento **descreve** aquele arquivo. Se os dois divergirem, o SQL vence e este documento está com bug.
+
+Postgres 16 + três extensões: `uuid-ossp` (chaves), `vector` (pgvector, memória semântica), `pg_trgm` (busca aproximada em texto — dedup e QA de caption).
+
+**Índice**
+
+1. [Princípios do modelo](#1-princípios-do-modelo)
+2. [Mapa de relacionamentos](#2-mapa-de-relacionamentos)
+3. [Tabelas](#3-tabelas)
+4. [ENUMs e máquinas de estado](#4-enums-e-máquinas-de-estado)
+5. [Índices](#5-índices)
+6. [Consultas de referência](#6-consultas-de-referência)
+7. [Convenções de migração](#7-convenções-de-migração)
+
+---
+
+## 1. Princípios do modelo
+
+### 1.1 Campos dormentes nascem na v1
+
+O schema da Fase 0 já contém colunas e tabelas inteiras que **nenhuma linha de código lê na Fase 1**: `sources`, `ingested_items`, `monitors`, `monitor_hits`, `clients`, e as colunas `content_items.source_refs`, `attribution`, `claim_status`, `accounts.client_id`.
+
+Isso é deliberado. O raciocínio:
+
+- **O custo hoje é zero.** Uma coluna `nullable` com default e uma tabela vazia não custam performance, não custam manutenção e não confundem quem lê o SQL — porque estão marcadas `[DORMENTE]`.
+- **O custo depois é alto.** Adicionar `rights_status NOT NULL` em `content_items` com 200 mil linhas e 50 contas em produção significa: janela de manutenção, backfill, revisão de todo código que faz `INSERT`, e um período em que metade do sistema conhece a coluna e a outra metade não.
+- **O schema é o contrato do produto inteiro, não da fase atual.** O PLANO já sabe que a Fase 4 (fofoca) precisa de `claim_status` e a Fase 5 (clipagem) precisa de `rights_status` e `clients`. Escrever isso agora é registrar a decisão no lugar onde ela não se perde.
+- **Força o desenho a ser honesto.** Se `content_items` só fizesse sentido para influencer, a abstração de arquétipo único (ADR-0006) seria falsa. Preencher os campos dos três arquétipos na v1 é o teste de que a espinha é mesmo compartilhada.
+
+**Regra de disciplina:** campo dormente **não** vira campo zumbi. Todo dormente tem uma fase declarada em que acorda. Se uma fase passa e o campo continua sem uso e sem dono, ele sai numa migração de limpeza — não fica "por via das dúvidas".
+
+### 1.2 Identificadores em inglês, documentação em português
+
+Tabelas, colunas, tipos e valores de ENUM são em inglês. Comentários, documentação e a interface do painel são em português.
+
+- O código é Python com SQLAlchemy: `account.persona_card`, `task.scheduled_for`, `ContentStatus.APPROVAL_PENDING`. Misturar idiomas dentro de uma expressão (`conta.persona_card`) produz código feio e ambíguo em conversões `snake_case`/`camelCase`.
+- Os serviços com que o core conversa (android-orchestrator, máquina de influencers) expõem APIs em inglês. Traduzir na fronteira do banco criaria duas nomenclaturas para a mesma coisa.
+- Prompts de LLM e few-shots citam nomes de campo. Modelos são melhores em esquemas em inglês.
+- O mapeamento PT ↔ EN de todo termo de domínio vive em [`docs/glossario.md`](glossario.md) — é lá que se resolve "conta" = `accounts`, "furo" = `ingested_items` com `novelty` alta, "espalhamento" = `spread_policy`.
+
+### 1.3 Auditoria é tabela de primeira classe
+
+`events` existe desde a linha 1 da Fase 0, antes de existir agente. Não é logging: é uma tabela transacional, com FKs para `accounts`, `campaigns` e `tasks`, escrita na **mesma transação** da decisão que ela registra.
+
+A pergunta que o sistema precisa responder em qualquer momento é: *"por que a conta X postou isso às 19h?"*. A resposta é uma cadeia — plano do dia → intenção → draft → QA → aprovação → task → dispatch → verificação → post — e cada elo escreve um `event` com o mesmo `trace_id`. Sem isso:
+
+- Um incidente de guardrail vira arqueologia em arquivo de log rotacionado.
+- Não há como distinguir "a LLM decidiu" de "o humano mandou" de "a campanha forçou".
+- Risco jurídico real (fofoca, Fase 4): publicar uma afirmação sem conseguir provar qual fonte a originou e quem aprovou é indefensável.
+
+Como consequência, `llm_calls` também é de primeira classe: cada chamada de modelo é uma linha com custo, latência, backend e `trace_id`. Custo de LLM não é métrica de infra, é métrica de produto — decide se um agente é viável.
+
+### 1.4 O agendamento mora no banco
+
+Não existe fila em memória decidindo *quando* algo acontece. `tasks.scheduled_for`, `monitors.next_check_at` e `campaign_participants.slot_at` são colunas indexadas, e o dispatcher é um *tick* que faz `SELECT ... FOR UPDATE SKIP LOCKED`. Redis é usado para transporte e locks, nunca como fonte da verdade do agendamento.
+
+Por quê:
+
+- **Reinício não perde nada.** Derrubar a stack no meio de uma campanha de 6 horas não desagenda ninguém.
+- **O agendamento é auditável e editável.** Um humano pode olhar no painel o que está agendado para as próximas 4 horas, e mover um slot com um `UPDATE`. Fila em memória não tem essa propriedade.
+- **Anti-detecção depende de consulta.** `spread_policy` precisa perguntar "quantas contas da casa já agiram nesta janela?" e "esta conta já bateu o teto de ações/hora?". Isso é um `GROUP BY`, não um estado distribuído em workers.
+- **Idempotência barata.** `external_task_id` + `status` no banco permitem que um webhook duplicado do orchestrator seja descartado com um `UPDATE ... WHERE status = 'dispatched'`.
+
+O preço aceito é polling (o dispatcher acorda a cada poucos segundos) e pressão de escrita no Postgres. Para a ordem de grandeza do projeto — dezenas a algumas centenas de contas, milhares de tasks/dia — é irrelevante.
+
+---
+
+## 2. Mapa de relacionamentos
+
+```
+                          ┌───────────┐
+                          │  clients  │ [DORMENTE — Fase 5]
+                          └─────┬─────┘
+                    ┌───────────┴────────────┐
+                    ▼                        ▼
+             ┌────────────┐            ┌───────────┐
+   ┌─────────│  accounts  │            │ campaigns │
+   │         └─────┬──────┘            └─────┬─────┘
+   │               │ (1 conta = 1 agente)    │
+   │               │                    ┌────┴──────────────────┐
+   ▼               │                    ▼                       ▼
+┌──────────────┐   │           ┌────────────────┐   ┌───────────────────────┐
+│persona_      │   │           │ campaign_recon │   │ campaign_participants │
+│versions      │   │           └───────┬────────┘   └───────────┬───────────┘
+└──────────────┘   │                   │ task_id                │ account_id
+                   │                   └──────────┐  ┌──────────┘
+   ╔═══════════════╧════════════════╗             ▼  ▼
+   ║  NARRATIVA / MEMÓRIA           ║        ┌──────────┐
+   ║  ┌────────────┐                ║        │  tasks   │◄──── origin:
+   ║  │ story_arcs │◄──┐            ║        └────┬─────┘  manager|self|
+   ║  └────────────┘   │ arc_id     ║             │        human|campaign|
+   ║  ┌────────────┐   │            ║             │        monitor
+   ║  │  memories  │───┘            ║             │
+   ║  └────────────┘                ║             ▼
+   ║  ┌────────────┐                ║        ┌─────────┐     ┌──────────────┐
+   ║  │ day_plans  │───┐            ║        │  posts  │────▶│ post_metrics │
+   ║  └────────────┘   │            ║        └────┬────┘     └──────────────┘
+   ╚═══════════════════╪════════════╝             │
+                       │ day_plan_id              ▼
+                       ▼                   ┌──────────────┐
+              ┌────────────────┐           │ interactions │
+              │ content_items  │──────────▶└──────────────┘
+              └───────┬────────┘  (via posts)
+                      │ ▲
+                      │ │ content_item_id
+                      │ │
+   ╔══════════════════╪═╪══════════════════════════╗
+   ║  INGESTÃO  [DORMENTE — Fase 4]                ║
+   ║  ┌─────────┐   ┌────────────────┐   ┌───────┐ ║
+   ║  │ sources │──▶│ ingested_items │◄──│monitor│ ║
+   ║  └─────────┘   └───────┬────────┘   │  s    │ ║
+   ║                        │            └───┬───┘ ║
+   ║                        ▼                │     ║
+   ║                  ┌──────────────┐◄──────┘     ║
+   ║                  │ monitor_hits │─────────────╫──▶ content_items
+   ║                  └──────────────┘             ║
+   ╚═══════════════════════════════════════════════╝
+
+   ┌─────────┐  compartilhado por todos os arquétipos, sem FK
+   │ trends  │  (consultado no PLAN e no PRODUCE)
+   └─────────┘
+
+   ╔═══════════════════════════════════════════════════════════════╗
+   ║  GOVERNANÇA — referenciam accounts/campaigns/tasks,           ║
+   ║  nunca são referenciadas                                      ║
+   ║  ┌───────────┐ ┌──────────────────────┐ ┌────────┐ ┌────────┐ ║
+   ║  │ approvals │ │ guardrail_violations │ │ events │ │llm_call│ ║
+   ║  └───────────┘ └──────────────────────┘ └────────┘ └───┬────┘ ║
+   ╚═════════════════════════════════════════════════════════╪═════╝
+                                    llm_call_id ◄────────────┘
+                                    (day_plans, campaign_recon)
+
+   ┌────────────────────┐
+   │ schema_migrations  │  controle de versão do schema
+   └────────────────────┘
+```
+
+**Leitura do mapa em uma frase:** `accounts` é o centro; tudo que é *vida* (memória, arco, plano) pende dela; tudo que é *trabalho* (conteúdo → task → post → métrica) flui da esquerda para a direita; campanhas injetam trabalho lateralmente; ingestão alimenta conteúdo por baixo; governança observa tudo por fora.
+
+### 2.1 FKs criadas depois (ciclos)
+
+Quatro FKs são adicionadas via `ALTER TABLE` no fim da migração porque formam ciclos de definição. Isso não é acidente, é ordenação:
+
+| FK | De → Para | Por que fica pro fim |
+|---|---|---|
+| `fk_ingested_monitor` | `ingested_items.monitor_id` → `monitors.id` | `ingested_items` é declarada antes de `monitors` |
+| `fk_hit_content` | `monitor_hits.content_item_id` → `content_items.id` | ingestão é declarada antes de conteúdo |
+| `fk_content_campaign` | `content_items.campaign_id` → `campaigns.id` | conteúdo antes de campanha |
+| `fk_recon_task` | `campaign_recon.task_id` → `tasks.id` | recon antes de tasks |
+| `fk_plan_llm` / `fk_recon_llm` | `day_plans` / `campaign_recon` → `llm_calls.id` | governança é a última seção |
+
+**Armadilha:** ao escrever uma nova migração que recria alguma dessas tabelas, lembre que a constraint tem **nome próprio** (`fk_recon_task`, não o nome gerado pelo Postgres). Um `DROP CONSTRAINT` com o nome errado falha silenciosamente em scripts com `IF EXISTS`.
+
+---
+
+## 3. Tabelas
+
+Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança.
+
+Convenções desta seção:
+- Todas as colunas `id uuid` usam `DEFAULT uuid_generate_v4()`, exceto `events.id` (`bigserial`).
+- `created_at`/`updated_at` são `timestamptz NOT NULL DEFAULT now()`. `updated_at` é mantido por trigger nas tabelas listadas em [3.25](#325-triggers-de-updated_at).
+- "obrig." = `NOT NULL` sem default útil (precisa vir do código).
+
+---
+
+### 3.1 `schema_migrations`
+
+Registro de quais migrações já rodaram neste banco. Lida e escrita apenas pelo runner de migração.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `version` | `text` PK | Nome do arquivo sem extensão: `0001_initial` |
+| `applied_at` | `timestamptz` | Quando foi aplicada |
+| `checksum` | `text` obrig. | SHA-256 do conteúdo do arquivo no momento da aplicação |
+
+**Quando usar / armadilhas.** O `checksum` existe para detectar edição de migração já aplicada. O runner **aborta** se o hash do arquivo em disco divergir do gravado — é a defesa mecânica da regra da seção 7. Nunca "conserte" essa divergência dando `UPDATE` no checksum: ou você reverte o arquivo, ou escreve uma migração nova.
+
+---
+
+### 3.2 `clients` **[DORMENTE — Fase 5]**
+
+Tenant. Existe porque clipagem é tipicamente serviço prestado a terceiros, e contas/campanhas precisarão ser atribuíveis a um contratante.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` obrig. | Nome do cliente/contratante |
+| `contract` | `jsonb` = `{}` | Termos operacionais: volume contratado, SLA, nichos permitidos, quem aprova |
+| `active` | `boolean` = `true` | Contrato vigente |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.** Até a Fase 5, toda linha do sistema tem `client_id IS NULL` — o "cliente" é a própria casa. **Não** escreva query que assuma `client_id NOT NULL`, e **não** use `client_id` como chave de particionamento de permissão antes da Fase 5: o modelo de autorização multi-tenant ainda não foi desenhado (`contract` é jsonb livre justamente para não congelar isso cedo).
+
+---
+
+### 3.3 `accounts`
+
+A unidade central do sistema: **1 linha = 1 conta de rede social = 1 agente**. Tudo que o Olimpo faz é atribuível a uma linha desta tabela.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `handle` | `text` obrig. | @ da conta, sem o `@` |
+| `platform` | `platform` obrig. | `instagram` \| `tiktok` \| `whatsapp` |
+| `archetype` | `archetype` = `influencer` | Define qual `ContentSource` o loop usa no passo SOURCE |
+| `status` | `account_status` = `draft` | Ciclo de vida operacional da conta |
+| `autonomy` | `autonomy_level` = `L0` | Quanto o agente pode fazer sem humano |
+| `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
+| `persona_card` | `jsonb` = `{}` | A "alma": voz, tabus, estética, lore, cadência. Spec em [docs/04](04-persona-card-spec.md) |
+| `persona_version` | `integer` = `1` | Versão corrente do card; espelha a última linha de `persona_versions` |
+| `persona_engine_id` | `text` | ID da persona na **máquina de influencers**. Sem ele não há geração de imagem consistente |
+| `device_binding` | `jsonb` = `{}` | Qual container/device redroid opera esta conta (referência ao android-manager) |
+| `cadence` | `jsonb` = `{"posts_per_day":1,"stories_per_day":3}` | Ritmo natural. **Teto** — campanha não pode ultrapassar |
+| `timezone` | `text` = `America/Sao_Paulo` | Fuso da persona, não do servidor |
+| `active_hours` | `int4range` = `[8,23)` | Janela "acordada" em horas locais. Fora dela o agente não age |
+| `mood` | `jsonb` = `{}` | Estado dinâmico (humor, energia). Entra no prompt e modula tom e frequência |
+| `followers` | `integer` = `0` | Último valor coletado. Usado em `campaigns.account_filter` |
+| `warmup_started_at` | `timestamptz` | Início do aquecimento — base para promover `warming` → `active` |
+| `last_action_at` | `timestamptz` | Última ação executada; alimenta rate limit e detecção de conta parada |
+| `notes` | `text` | Anotação humana livre |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram e no TikTok como duas contas (dois agentes independentes, com memória separada).
+
+**Quando usar / armadilhas.**
+- `active_hours` é `int4range` de **horas inteiras locais**, não `timestamptz`. `[8,23)` = das 08:00 às 22:59. Range que cruza a meia-noite (ex.: madrugada de conta noturna) **não** é representável em um único range — use `[0,3)` + política no código, ou reveja a persona. Isto é uma limitação conhecida do schema v1.
+- `cadence` aqui é o **teto operacional**; `persona_card.cadence` é a **intenção editorial**. Divergiram? O banco vence. O painel deve mostrar os dois.
+- `mood` é jsonb sem schema fixo de propósito: o formato ainda está sendo descoberto na Fase 1/3. Não crie índice nele antes de estabilizar.
+- Deletar uma `account` cascateia memória, arcos, planos, conteúdo, posts, interações, tasks, aprovações e violações. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste.
+
+---
+
+### 3.4 `persona_versions`
+
+Histórico imutável do Persona Card. Responde "por que ela mudou de voz na semana passada?".
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `version` | `integer` obrig. | Inteiro monotônico por conta |
+| `persona_card` | `jsonb` obrig. | Snapshot **completo** do card nessa versão (não é diff) |
+| `changed_by` | `text` | `human:chris` \| `agent:reflect` \| `migration:0007` |
+| `change_note` | `text` | Justificativa em texto livre — obrigatória por convenção do painel |
+| `created_at` | `timestamptz` | |
+
+Restrição: `UNIQUE (account_id, version)`.
+
+**Quando usar / armadilhas.** Grave a versão **antes** de sobrescrever `accounts.persona_card`, na mesma transação. Snapshot completo é escolha consciente: diffs economizam bytes e custam a capacidade de reconstruir o prompt exato de um post antigo. Nunca faça `UPDATE` em uma linha aqui — é append-only.
+
+---
+
+### 3.5 `story_arcs`
+
+Arco narrativo em curso ("treinando para a maratona", "mudança de cidade"). É o que impede a conta de virar um gerador de posts sem continuidade.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `title` | `text` obrig. | Nome curto do arco |
+| `summary` | `text` obrig. | Sinopse injetada no prompt de PLAN |
+| `state` | `jsonb` = `{}` | Onde está no arco: fase, marcos batidos, próximos beats |
+| `starts_at` | `date` obrig. | |
+| `ends_at` | `date` | `NULL` = arco aberto |
+| `active` | `boolean` = `true` | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.** Nada impede vários arcos ativos por conta — e isso é intencional (um arco pessoal + um profissional). Mas **mais de 2–3 arcos ativos degradam o plano do dia**: o prompt fica com objetivos conflitantes e a LLM produz posts genéricos. Trate `count(*) WHERE active` > 3 como alerta operacional. Encerrar arco é `active = false` + `ends_at`, nunca `DELETE` (memórias apontam para ele).
+
+---
+
+### 3.6 `memories`
+
+O *memory stream* do blueprint generative_agents. Tudo que o agente sabe sobre si e sobre o mundo dele.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `kind` | `memory_kind` obrig. | `episodic` \| `semantic` \| `narrative` |
+| `content` | `text` obrig. | A memória em linguagem natural, primeira pessoa |
+| `embedding` | `vector(1024)` | Embedding de `content`. `NULL` = ainda não indexada |
+| `importance` | `real` = `5.0` | 0..10, atribuída pela LLM **na escrita** |
+| `metadata` | `jsonb` = `{}` | Refs: post_id, handle do seguidor, task_id, fonte |
+| `arc_id` | `uuid` → `story_arcs` | `ON DELETE SET NULL` |
+| `occurred_at` | `timestamptz` = `now()` | Quando o fato aconteceu (≠ quando foi gravado) |
+| `last_used_at` | `timestamptz` | Última vez que foi recuperada para um prompt |
+| `created_at` | `timestamptz` | Quando foi gravada |
+
+**Quando usar / armadilhas.**
+- `vector(1024)` fixa a dimensão do modelo de embedding. **Trocar de modelo de embedding exige migração e re-embedding de tudo** — não é configuração, é decisão de schema. Modelo escolhido e sua dimensão devem estar registrados em [docs/09](09-llm-gateway.md).
+- `occurred_at` vs `created_at`: uma reflexão escrita à noite sobre a manhã tem `occurred_at` de manhã. A recência da recuperação usa `occurred_at`. Confundir os dois faz o agente achar que tudo aconteceu na hora da reflexão.
+- `importance` é atribuída **uma vez**, na escrita, pela LLM que criou a memória. Não recalcule em lote: isso reescreve a história do agente.
+- `last_used_at` não participa do ranking na v1 — é telemetria para decidir política de esquecimento (Fase 6). Escreva, não leia.
+- O índice HNSW cobre `embedding`, mas as consultas reais **sempre** filtram por `account_id` primeiro. Memória de uma conta nunca pode vazar para outra: esse `WHERE` é regra de segurança, não otimização.
+
+---
+
+### 3.7 `day_plans`
+
+Saída do passo **PLAN**: o que esta conta pretende fazer hoje e por quê. Uma linha por conta por dia.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `plan_date` | `date` obrig. | Data **no fuso da conta**, não em UTC |
+| `narrative` | `text` obrig. | "Hoje ela está na praia, humor alto, foco em leveza" |
+| `intents` | `jsonb` obrig. | Lista de intenções que viram `content_items` e `tasks` |
+| `reasoning` | `text` | Por que este plano — auditoria e depuração de prompt |
+| `llm_call_id` | `uuid` → `llm_calls` | `ON DELETE SET NULL`. Rastreia custo/latência do plano |
+| `created_at` | `timestamptz` | |
+
+Restrição: `UNIQUE (account_id, plan_date)`.
+
+**Quando usar / armadilhas.** O `UNIQUE` é uma trava de idempotência: rodar o PLAN duas vezes no mesmo dia deve dar conflito, não duplicar o dia. Use `INSERT ... ON CONFLICT DO NOTHING` e trate o conflito como "já planejado". Replanejar (evento novo, campanha urgente) é `UPDATE` da linha existente + `event` registrando o replanejamento — **nunca** delete e recrie, ou os `content_items` perdem `day_plan_id`.
+
+`plan_date` derivado de `accounts.timezone`: uma conta em `America/Sao_Paulo` que planeja às 23:30 local está planejando o dia D, não D+1 (que é o que UTC diria).
+
+---
+
+### 3.8 `sources` **[DORMENTE — Fase 4]**
+
+Catálogo de fontes de conteúdo externo. É cadastro estático: *o que existe para observar*.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `kind` | `source_kind` obrig. | `ig_account`, `hashtag`, `rss`, `youtube_channel`, `live_stream`, ... |
+| `endpoint` | `text` obrig. | `@handle`, `#tag`, URL, id de canal |
+| `niche` | `text` | Nicho ao qual a fonte serve |
+| `reliability` | `real` = `0.5` | 0..1. **Alimenta o `claim_status` do conteúdo derivado** |
+| `active` | `boolean` = `true` | |
+| `metadata` | `jsonb` = `{}` | Credenciais de leitura, seletores, idioma |
+| `created_at` | `timestamptz` | |
+
+Restrição: `UNIQUE (kind, endpoint)`.
+
+**Quando usar / armadilhas.** Distinção que o schema faz de propósito: `sources` é **catálogo**, `monitors` é **processo vivo**. Uma fonte sem monitor nunca é lida. Um monitor sem fonte (`source_id NULL`) é válido — é o caso do monitor que vigia algo ad-hoc.
+
+`reliability` não é enfeite: na Fase 4 ele é a entrada do cálculo que decide se uma afirmação sai como `reported` ou `rumor`. Cadastrar tudo com 0.5 anula o mecanismo.
+
+---
+
+### 3.9 `ingested_items` **[DORMENTE — Fase 4]**
+
+Item bruto coletado de uma fonte, antes de virar conteúdo. É onde o "furo" aterrissa.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `source_id` | `uuid` → `sources` | `ON DELETE SET NULL` |
+| `monitor_id` | `uuid` → `monitors` | FK adicionada via `ALTER TABLE`; `ON DELETE SET NULL` |
+| `dedup_hash` | `text` obrig. **UNIQUE** | Hash do conteúdo normalizado — impede reprocessar o mesmo furo |
+| `payload` | `jsonb` obrig. | O item como veio: texto, autor, timestamps, URL |
+| `media_refs` | `jsonb` = `[]` | Refs de mídia baixada/screenshot |
+| `relevance` | `real` | 0..1, quão relevante para o nicho |
+| `novelty` | `real` | 0..1, quão novo vs. o que já vimos |
+| `consumed_by` | `uuid` → `accounts` | Conta que já usou este item. `NULL` = disponível |
+| `ingested_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** O `UNIQUE (dedup_hash)` é a defesa contra o mesmo furo chegando por cinco fontes. Consequência prática: a inserção **deve** usar `ON CONFLICT (dedup_hash) DO NOTHING` — se o código explodir na colisão, o monitor entra em loop de erro. O hash precisa ser de conteúdo *normalizado* (sem UTM, sem timestamp de coleta), senão dedup não dedupa nada.
+
+`consumed_by` é escalar, ou seja, **um item é consumido por no máximo uma conta**. Isso é intencional: duas páginas de fofoca da casa postando o mesmo furo com o mesmo enquadramento é sinal de farm. Se um dia for necessário compartilhamento, será tabela de junção — não troque para array.
+
+---
+
+### 3.10 `monitors` **[DORMENTE — Fase 4]**
+
+O vigia persistente: checa um alvo em intervalo curto, detecta novidade e dispara produção. É o processo, não o catálogo.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` obrig. | Nome operacional ("perfis de TV aberta") |
+| `owner_account_id` | `uuid` → `accounts` | Conta dona do resultado. `ON DELETE CASCADE` |
+| `source_id` | `uuid` → `sources` | `ON DELETE SET NULL` |
+| `status` | `monitor_status` = `active` | `active` \| `paused` \| `error` \| `disabled` |
+| `interval_seconds` | `integer` = `300` | Período de checagem |
+| `collector_pool` | `jsonb` = `[]` | Lista de contas Android que fazem a coleta, em rodízio |
+| `trigger_rules` | `jsonb` = `{}` | O que conta como "novidade que merece post" |
+| `last_check_at` | `timestamptz` | |
+| `next_check_at` | `timestamptz` | **Coluna que o scheduler consulta** |
+| `consecutive_errors` | `integer` = `0` | Zera no sucesso; ao estourar o limite → `status = 'error'` |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.** `collector_pool` existe por uma razão específica: uma única conta Android checando 40 perfis a cada 5 minutos é comportamento não-humano e queima a conta. O rodízio é obrigatório, não opcional — deixar a pool com um elemento só anula o mecanismo.
+
+`interval_seconds` baixo (< 60) multiplica ações no farm. O teto real não é este campo, é `ACCOUNT_MAX_ACTIONS_PER_HOUR` por conta coletora: com 12 ações/hora por conta, um monitor de 300s precisa de pelo menos 1 conta dedicada.
+
+`consecutive_errors` deve mover o monitor para `error` e **parar de agendar**, não continuar tentando. Monitor em `error` é item de runbook.
+
+---
+
+### 3.11 `monitor_hits` **[DORMENTE — Fase 4]**
+
+Cada checagem que encontrou algo. É o log de detecção: liga "o monitor viu isto" a "virou este conteúdo".
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `monitor_id` | `uuid` → `monitors` obrig. | `ON DELETE CASCADE` |
+| `ingested_id` | `uuid` → `ingested_items` | `ON DELETE SET NULL` |
+| `triggered` | `boolean` = `false` | Passou nas `trigger_rules`? |
+| `trigger_reason` | `text` | Qual regra disparou (ou por que não disparou) |
+| `content_item_id` | `uuid` → `content_items` | FK via `ALTER TABLE`. Conteúdo que nasceu deste hit |
+| `detected_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** Grave hits **também quando `triggered = false`**. É o que permite ajustar `trigger_rules` com dado real ("nas últimas 24h, 300 hits, 4 disparos, e os 3 furos que perdemos estavam entre os não-disparados"). Sem os negativos, calibrar regra vira chute.
+
+Volume: um monitor de 300s gera ~288 hits/dia. Dez monitores = ~3k linhas/dia. Planeje retenção/particionamento antes da Fase 4 virar produção.
+
+---
+
+### 3.12 `trends`
+
+Sinais de tendência da plataforma (áudio em alta, hashtag, formato, tópico). Compartilhado pelos três arquétipos; sem FK para conta.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `platform` | `platform` obrig. | |
+| `kind` | `text` obrig. | `audio` \| `hashtag` \| `format` \| `topic` (texto livre por escolha) |
+| `ref` | `text` obrig. | ID do áudio, texto da hashtag, nome do formato |
+| `label` | `text` | Rótulo legível |
+| `score` | `real` = `0` | Força da tendência |
+| `metadata` | `jsonb` = `{}` | Origem do sinal, contadores, amostras |
+| `window_start` | `timestamptz` = `now()` | Início da janela de observação |
+| `window_end` | `timestamptz` | `NULL` = **tendência viva** |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** `kind` é `text` e não ENUM porque tendência é o domínio que mais muda — congelar em ENUM garantiria migração a cada trimestre. O preço é que o código precisa validar; mantenha a lista canônica em um só lugar no Python.
+
+`window_end IS NULL` é o marcador de "viva" e é o que o índice parcial usa. Encerrar tendência é **preencher** `window_end`, nunca deletar: o histórico de qual áudio estava em alta quando um post foi feito é insumo de análise (Fase 6).
+
+Não há unicidade em `(platform, kind, ref)` — o mesmo áudio pode ter várias janelas ao longo do tempo. Consultar sem `window_end IS NULL` traz lixo histórico.
+
+---
+
+### 3.13 `content_items`
+
+A peça de conteúdo em produção: da ideia ao publicado. É onde QA, direitos e status epistêmico moram.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `day_plan_id` | `uuid` → `day_plans` | De qual plano nasceu. `ON DELETE SET NULL` |
+| `campaign_id` | `uuid` → `campaigns` | FK via `ALTER TABLE`. `ON DELETE SET NULL` |
+| `kind` | `task_type` obrig. | Reusa o ENUM: `publish_post` \| `publish_story` \| `publish_reels` |
+| `status` | `content_status` = `draft` | Ver máquina de estados em [4.7](#47-content_status) |
+| `caption` | `text` | Texto final na voz da persona |
+| `hashtags` | `text[]` | Sem o `#` |
+| `audio_ref` | `text` | Áudio da plataforma (normalmente vindo de `trends.ref`) |
+| `media_refs` | `jsonb` = `[]` | Refs no storage / máquina de influencers |
+| `source_strategy` | `text` = `generated` | `generated` \| `curated` \| `derived` — qual `ContentSource` produziu |
+| `source_refs` | `jsonb` = `[]` | **[DORMENTE]** De onde veio (URL, conta, live, `ingested_items.id`) |
+| `attribution` | `text` | **[DORMENTE]** Crédito obrigatório ao criador original (clipagem) |
+| `rights_status` | `rights_status` = `own` | `own` \| `licensed` \| `fair_use` \| `unknown`. `unknown` **bloqueia** publicação |
+| `claim_status` | `claim_status` = `unverified` | **[DORMENTE]** Status epistêmico; `unverified` bloqueia em L≥1 |
+| `qa_report` | `jsonb` = `{}` | Saída do passo QA: checks, scores, motivo de reprovação |
+| `reasoning` | `text` | Por que este conteúdo — auditoria |
+| `scheduled_for` | `timestamptz` | Quando deve ir ao ar |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.**
+- `kind` reusar `task_type` é economia consciente de ENUM, mas **permite valores absurdos** (`kind = 'like'`). Não há CHECK no banco na v1 — a validação é do código. Se isso vazar em produção, a correção é um `CHECK constraint` em migração nova.
+- Os defaults `rights_status = 'own'` e `claim_status = 'unverified'` estão calibrados para o arquétipo **influencer** (conteúdo gerado por nós, sem afirmação factual). Para fofoca e clipagem, o `ContentSource` **tem que** sobrescrever explicitamente. Um item de fofoca salvo com `own`/`unverified` por inércia é exatamente o bug jurídico que a Fase 4 precisa evitar.
+- `content_items` é o **draft**; `posts` é o **publicado**. Não é a mesma coisa e não devem ser fundidas: um item pode ser reprovado, reagendado ou republicado.
+- `scheduled_for` aqui é a **intenção editorial**; `tasks.scheduled_for` é o **agendamento real após jitter**. Divergem de propósito. O painel deve mostrar o da task.
+
+---
+
+### 3.14 `campaigns`
+
+Brief coordenado emitido pelo manager. Cada conta elegível traduz o brief pela própria realidade.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` obrig. | |
+| `kind` | `campaign_kind` = `content` | `content` \| `engagement` \| `mixed` |
+| `status` | `campaign_status` = `draft` | Ver máquina de estados em [4.8](#48-campaign_status) |
+| `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
+| `brief` | `text` obrig. | O que o humano pediu, em português |
+| `target_url` | `text` | Alvo externo a inspecionar (campanha de engajamento) |
+| `target_handle` | `text` | Perfil alvo |
+| `brand_refs` | `jsonb` = `[]` | Assets de marca para a máquina de influencers |
+| `audio_ref` | `text` | Áudio obrigatório da campanha |
+| `account_filter` | `jsonb` = `{}` | Elegibilidade: nicho, arquétipo, followers mínimo, plataforma |
+| `spread_policy` | `jsonb` **obrig., sem default** | Política anti-detecção. Ver [docs/06](06-campanhas.md) |
+| `window_start` | `timestamptz` obrig. | |
+| `window_end` | `timestamptz` obrig. | |
+| `created_by` | `text` | Quem emitiu |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+Restrição: `CHECK (window_end > window_start)`.
+
+**Quando usar / armadilhas.** `spread_policy` é `NOT NULL` **sem default** — é a única coluna do schema com essa combinação, e é intencional: é impossível criar campanha sem declarar espalhamento. `{}` passa no banco mas **tem que** ser rejeitado na validação da aplicação (jitter, participação parcial e limite de grafo são obrigatórios). Ver [docs/06 § Espalhamento](06-campanhas.md#espalhamento).
+
+Campanha de engajamento (`kind IN ('engagement','mixed')` com `target_url`) **não pode** sair de `draft` direto para `planning`: passa obrigatoriamente por `recon_pending`. Planejar sem ver o alvo é o cenário em que 20 contas comentam num post que virou crime/tragédia.
+
+---
+
+### 3.15 `campaign_recon`
+
+O resultado de "mandar uma conta Android abrir o conteúdo alvo e olhar". Separa o que foi **capturado** do que foi **entendido**.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `campaign_id` | `uuid` → `campaigns` obrig. | `ON DELETE CASCADE` |
+| `task_id` | `uuid` → `tasks` | FK via `ALTER TABLE`. A task `extract_content` que coletou |
+| `collector_account_id` | `uuid` → `accounts` | Conta que fez a coleta. `ON DELETE SET NULL` |
+| `raw_capture` | `jsonb` = `{}` | Bruto: caption, autor, contadores, data |
+| `media_refs` | `jsonb` = `[]` | Screenshots / vídeo baixado |
+| `top_comments` | `jsonb` = `[]` | Comentários em destaque — sinal de clima |
+| `analysis` | `jsonb` = `{}` | Entendido pela LLM multimodal: tema, tom, público, gancho |
+| `summary` | `text` | Resumo em uma frase |
+| `sentiment` | `text` | Clima geral |
+| `safety_verdict` | `text` | `safe` \| `risky` \| `blocked` |
+| `safety_reasons` | `text[]` | Motivos do veredito |
+| `suggested_angles` | `jsonb` = `[]` | Ângulos de comentário para as personas adaptarem |
+| `llm_call_id` | `uuid` → `llm_calls` | `ON DELETE SET NULL` |
+| `captured_at` | `timestamptz` | Quando a conta Android olhou |
+| `analyzed_at` | `timestamptz` | Quando a LLM analisou |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** A separação `raw_capture` / `analysis` e `captured_at` / `analyzed_at` existe porque as duas etapas falham por motivos diferentes: captura falha por device/login, análise falha por modelo. Uma linha com `captured_at` preenchido e `analyzed_at NULL` é "coletado, aguardando análise" — estado normal, não erro.
+
+`safety_verdict = 'blocked'` **aborta a campanha**, não apenas alerta. Essa transição (`recon_pending`/`recon_done` → `aborted`) é o principal freio de mão do subsistema.
+
+Não há `UNIQUE (campaign_id)`: recon pode ser refeito (alvo mudou, captura falhou). Consulte sempre o mais recente por `created_at DESC`, ou o painel mostrará um recon velho.
+
+---
+
+### 3.16 `campaign_participants`
+
+Quem entra na campanha, o que cada um faz e **quando** — o resultado material do espalhamento.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `campaign_id` | `uuid` → `campaigns` obrig. | `ON DELETE CASCADE` |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `local_adaptation` | `text` | Como esta persona traduziu o brief para a própria realidade |
+| `actions` | `jsonb` = `[]` | `[{type:'comment', text:'...', at:'...'}]` |
+| `slot_at` | `timestamptz` obrig. | Slot sorteado dentro da janela (jitter) |
+| `skipped` | `boolean` = `false` | Conta sorteada mas fora |
+| `skip_reason` | `text` | Por que ficou fora (cadência, nicho, rate limit, humor) |
+| `created_at` | `timestamptz` | |
+
+Restrição: `UNIQUE (campaign_id, account_id)`.
+
+**Quando usar / armadilhas.** Registre também os **pulados** (`skipped = true` + `skip_reason`). Participação parcial é regra anti-detecção; sem o registro do "não", é impossível auditar se o sorteio está realmente sorteando ou se o filtro está sempre pegando as mesmas 5 contas.
+
+`slot_at` deve ser gerado com jitter dentro de `[window_start, window_end)` respeitando `CAMPAIGN_JITTER_MIN_MINUTES`. Dois `slot_at` a menos de ~25 minutos entre contas da casa é o padrão que denuncia farm.
+
+---
+
+### 3.17 `tasks`
+
+A ponte com o android-orchestrator. Toda ação com efeito no mundo — e algumas puramente internas — é uma linha aqui.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` | `ON DELETE CASCADE`. `NULL` só para tasks de sistema |
+| `type` | `task_type` obrig. | Ver [4.4](#44-task_type) |
+| `status` | `task_status` = `pending` | Ver máquina de estados em [4.6](#46-task_status) |
+| `priority` | `integer` = `100` | **Menor = mais urgente** |
+| `origin` | `text` = `self` | `manager` \| `self` \| `human` \| `campaign` \| `monitor` |
+| `payload` | `jsonb` = `{}` | Parâmetros da ação para o orchestrator |
+| `content_item_id` | `uuid` → `content_items` | `ON DELETE SET NULL` |
+| `campaign_id` | `uuid` → `campaigns` | `ON DELETE SET NULL` |
+| `monitor_id` | `uuid` → `monitors` | `ON DELETE SET NULL` |
+| `scheduled_for` | `timestamptz` = `now()` | **Quando pode ser despachada** (já com jitter) |
+| `expires_at` | `timestamptz` | Depois disto a task perde valor → `expired` |
+| `dispatched_at` | `timestamptz` | |
+| `verified_at` | `timestamptz` | Preenchido só quando o orchestrator **verifica** |
+| `external_task_id` | `text` | ID no android-orchestrator |
+| `external_status` | `text` | Último status bruto reportado pelo orchestrator |
+| `result` | `jsonb` = `{}` | Retorno da execução (ids, screenshots, erros) |
+| `attempts` | `integer` = `0` | |
+| `max_attempts` | `integer` = `3` | |
+| `last_error` | `text` | |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+**Quando usar / armadilhas.**
+- `verified` significa **verificado**, não "enviado com sucesso". O orchestrator confirma por leitura de tela. Tratar `dispatched` como sucesso é o erro clássico: a conta pode ter caído em checkpoint e o post nunca existiu.
+- `priority` invertido (menor = mais urgente) segue convenção de fila Unix. Resposta a comentário ≈ 10; post planejado ≈ 100; aquecimento ≈ 500.
+- `expires_at` é a diferença entre um post de fofoca e um post de influencer: furo com 40 minutos não vale nada. Task sem `expires_at` nunca expira — correto para conteúdo evergreen, errado para reativo.
+- `external_task_id` é a chave de idempotência do webhook. O handler deve ser `UPDATE ... WHERE external_task_id = $1 AND status IN ('dispatched','running')`, para que reentrega não reviva task cancelada.
+- `account_id` é nullable, mas na prática quase toda task tem conta. Task sem conta não é contabilizada no rate limit por conta — não use isso para "furar a fila".
+
+---
+
+### 3.18 `posts`
+
+O que efetivamente foi publicado numa plataforma. Só nasce depois de uma task `verified`.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `content_item_id` | `uuid` → `content_items` | `ON DELETE SET NULL` |
+| `task_id` | `uuid` → `tasks` | A task que publicou. `ON DELETE SET NULL` |
+| `platform` | `platform` obrig. | |
+| `external_id` | `text` | ID do post na plataforma |
+| `permalink` | `text` | URL pública |
+| `published_at` | `timestamptz` = `now()` | Momento real da publicação |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** `external_id` e `permalink` são nullable porque nem toda ação verificada devolve identificador (story, por exemplo). Não trate `external_id NULL` como falha.
+
+Não há `UNIQUE (platform, external_id)` na v1 — reentrega de webhook pode duplicar. A guarda é no código: só crie `post` na transição `running → verified`, uma vez.
+
+---
+
+### 3.19 `post_metrics`
+
+Série temporal de métricas por post. Uma linha por coleta, não uma linha por post.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `post_id` | `uuid` → `posts` obrig. | `ON DELETE CASCADE` |
+| `likes`, `comments`, `shares`, `saves`, `reach`, `views` | `integer` = `0` | Contadores no momento da coleta |
+| `raw` | `jsonb` = `{}` | Payload bruto do orchestrator |
+| `collected_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** São valores **absolutos e cumulativos**, não deltas. Somar linhas dá número sem sentido; para crescimento, use `LAG()`/diferença entre coletas. Métrica "atual" é sempre `DISTINCT ON (post_id) ... ORDER BY collected_at DESC`.
+
+Tabela de maior crescimento do sistema. Defina política de retenção (ex.: alta frequência nas primeiras 48h, depois diária) antes de escalar para dezenas de contas.
+
+---
+
+### 3.20 `interactions`
+
+Comentários, DMs e menções recebidas — e como foram (ou não) respondidas.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `post_id` | `uuid` → `posts` | `ON DELETE SET NULL`. `NULL` para DM |
+| `kind` | `text` obrig. | `comment` \| `dm` \| `mention` |
+| `external_id` | `text` | ID na plataforma |
+| `author_handle` | `text` | Quem interagiu |
+| `body` | `text` obrig. | Texto recebido |
+| `classification` | `text` | `fan` \| `hater` \| `spam` \| `opportunity` \| `sensitive` |
+| `sensitive` | `boolean` = `false` | **Nunca auto-respondido** em nenhum nível de autonomia |
+| `reply_body` | `text` | Resposta enviada |
+| `replied_by` | `text` | `agent` \| `human` \| `none` |
+| `replied_at` | `timestamptz` | `NULL` = pendente |
+| `received_at` | `timestamptz` | |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** `sensitive` é flag de segurança independente de `classification`: saúde, dinheiro, romance, assédio, menor de idade. Mesmo em **L3**, sensível vai para humano. Implemente essa checagem no dispatcher, não só no prompt — prompt não é guardrail.
+
+`replied_by = 'none'` (decisão explícita de não responder) é diferente de `replied_at IS NULL` (ainda pendente). Marcar "não vou responder" fecha o item; deixar `NULL` mantém a fila crescendo para sempre.
+
+`author_handle` é dado de terceiro real. Vale a política de retenção/anonimização de [docs/12](12-seguranca.md).
+
+---
+
+### 3.21 `approvals`
+
+Fila de decisão humana. Polimórfica: vale para conteúdo, campanha ou interação.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `subject_type` | `text` obrig. | `content_item` \| `campaign` \| `interaction` |
+| `subject_id` | `uuid` obrig. | ID na tabela correspondente (**sem FK**) |
+| `account_id` | `uuid` → `accounts` | `ON DELETE CASCADE` |
+| `decision` | `text` | `approved` \| `rejected` \| `edited` |
+| `decided_by` | `text` | Quem decidiu |
+| `note` | `text` | Justificativa |
+| `edited_payload` | `jsonb` | Versão corrigida pelo humano (quando `edited`) |
+| `sampled` | `boolean` = `false` | `true` = revisão por amostragem (L2); `false` = exigência (L0/L1) |
+| `requested_at` | `timestamptz` | |
+| `decided_at` | `timestamptz` | `NULL` = aberta |
+
+**Quando usar / armadilhas.** `subject_id` é polimórfico e **não tem integridade referencial**. Deletar o sujeito deixa a aprovação órfã. Aceito conscientemente (o alternativo seriam três tabelas quase idênticas), mas obriga o painel a lidar com sujeito inexistente.
+
+`sampled` separa duas métricas que não podem se misturar: taxa de rejeição em revisão obrigatória (mede o agente sob supervisão) vs. em amostragem (mede o agente solto, e é o número que autoriza promover para L3).
+
+`edited_payload` é ouro para treino/ajuste de prompt: é o humano mostrando exatamente o que estava errado.
+
+---
+
+### 3.22 `guardrail_violations`
+
+Toda vez que uma regra de segurança foi acionada — bloqueando, sinalizando ou suspendendo.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` | `ON DELETE CASCADE` |
+| `subject_type` / `subject_id` | `text` / `uuid` | O que foi barrado (sem FK) |
+| `rule` | `text` obrig. | ID estável da regra: `no_health_advice`, `claim_status_required` |
+| `severity` | `text` obrig. | `info` \| `warn` \| `block` \| `kill` |
+| `detail` | `jsonb` = `{}` | Trecho ofensor, score, contexto |
+| `action_taken` | `text` | `blocked` \| `flagged` \| `suspended` |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** Grave violação mesmo em `severity = 'info'`. A curva de `info`/`warn` por conta é o **indicador antecedente** de que uma persona está derivando — muito antes do primeiro `block`.
+
+`rule` precisa ser um identificador **estável**, versionado junto com o catálogo de regras em [docs/08](08-guardrails-e-autonomia.md). Se o texto da regra mudar de nome, a série histórica quebra.
+
+`severity = 'kill'` implica `accounts.status = 'suspended'`. As duas escritas vão na mesma transação.
+
+---
+
+### 3.23 `events`
+
+Auditoria total. Toda decisão do sistema vira uma linha aqui. É a tabela que responde "por que a conta X postou isso às 19h?".
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `bigserial` PK | Sequencial — a ordem de inserção importa |
+| `account_id` | `uuid` → `accounts` | `ON DELETE SET NULL` (evento sobrevive à conta) |
+| `campaign_id` | `uuid` → `campaigns` | `ON DELETE SET NULL` |
+| `task_id` | `uuid` → `tasks` | `ON DELETE SET NULL` |
+| `type` | `text` obrig. | `plan.created`, `content.qa_failed`, `task.dispatched`, `post.verified` |
+| `detail` | `jsonb` = `{}` | Contexto estruturado do evento |
+| `trace_id` | `text` | **Correlaciona toda a cadeia de uma decisão** |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.**
+- `bigserial` e não `uuid`: aqui a ordem total de inserção é a feature principal. `ORDER BY id` é a linha do tempo real, imune a relógio.
+- `ON DELETE SET NULL` em todas as FKs é deliberado: apagar uma conta **não** pode apagar a trilha de auditoria dela.
+- `trace_id` é o campo mais importante da tabela e o mais fácil de esquecer. Ele nasce no PLAN e **precisa ser propagado** por content_item → task → dispatch → webhook → post. Um `trace_id` que morre no meio transforma auditoria em adivinhação. Use o mesmo valor em `llm_calls.trace_id`.
+- `type` é hierárquico por convenção (`dominio.acao`), o que permite `LIKE 'task.%'`. Mantenha o catálogo em [docs/11](11-observabilidade.md).
+- Append-only. Nunca `UPDATE`, nunca `DELETE` fora de política de retenção declarada.
+
+---
+
+### 3.24 `llm_calls`
+
+Custo, latência e resultado de cada chamada de modelo. Mac mini vs. API externa.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `account_id` | `uuid` → `accounts` | `ON DELETE SET NULL` |
+| `purpose` | `text` obrig. | `plan_day` \| `caption` \| `reply_comment` \| `recon_analysis` \| `reflect` |
+| `model` | `text` obrig. | Nome do modelo |
+| `backend` | `text` obrig. | `mac_mini_1` \| `mac_mini_2` \| `anthropic` \| `openai` |
+| `prompt_tokens` / `output_tokens` | `integer` | |
+| `latency_ms` | `integer` | |
+| `cost_usd` | `numeric(10,6)` = `0` | **0 para backend local** — por isso `backend` é obrigatório |
+| `success` | `boolean` = `true` | |
+| `error` | `text` | |
+| `trace_id` | `text` | Mesmo `trace_id` de `events` |
+| `created_at` | `timestamptz` | |
+
+**Quando usar / armadilhas.** `cost_usd = 0` em backend local é correto e desejado, mas torna "custo total" um número enganoso: o gargalo dos Mac minis aparece em `latency_ms`, não em dólar. Monitore os dois eixos — dólar para overflow externo (`LLM_DAILY_BUDGET_USD`), latência para capacidade local.
+
+`numeric(10,6)` suporta até ~9.999,999999 USD por chamada. Suficiente com folga; nunca use `float` para dinheiro.
+
+Registre **também** as chamadas que falharam (`success = false`). Taxa de falha por backend é o sinal que dispara failover no LiteLLM.
+
+Ligações: `day_plans.llm_call_id` e `campaign_recon.llm_call_id` apontam para cá (FKs adicionadas no fim da migração), permitindo ir do artefato à chamada que o produziu.
+
+---
+
+### 3.25 Triggers de `updated_at`
+
+A função `touch_updated_at()` é aplicada via `CREATE TRIGGER ... BEFORE UPDATE` a **sete** tabelas:
+
+`clients` · `accounts` · `story_arcs` · `monitors` · `content_items` · `campaigns` · `tasks`
+
+**Armadilha:** as demais tabelas **não têm** `updated_at` — são append-only por design (`events`, `llm_calls`, `memories`, `persona_versions`, `post_metrics`, `monitor_hits`, `guardrail_violations`) ou têm marco temporal próprio (`approvals.decided_at`, `interactions.replied_at`, `campaign_recon.analyzed_at`). Ao criar tabela nova, decida explicitamente em qual grupo ela entra e, se mutável, **adicione o trigger na mesma migração** — o bloco `DO $$` original não é reexecutado.
+
+---
+
+## 4. ENUMs e máquinas de estado
+
+Catorze ENUMs. Regra geral: adicionar valor a ENUM em Postgres é barato (`ALTER TYPE ... ADD VALUE`), **remover é caro** (recriar o tipo). Portanto: só entra valor que já tem significado operacional definido.
+
+### 4.1 `archetype`
+
+Define qual implementação de `ContentSource` o passo SOURCE usa. É o único eixo em que os três produtos divergem.
+
+| Valor | Significado | `ContentSource` | Fase |
+|---|---|---|---|
+| `influencer` | Persona fictícia com vida própria | `GeneratedSource` (máquina de influencers) | 1–3 |
+| `gossip` | Página de fofoca/nicho, curadoria editorial | `CuratedSource` (monitores + ingestão) | 4 |
+| `clipper` | Clipagem de conteúdo longo | `DerivedSource` (media-forge) | 5 |
+
+**Transições:** nenhuma. Arquétipo é imutável após criação da conta — trocar significaria descartar memória, arcos e persona. Para mudar de arquétipo, crie outra conta.
+
+### 4.2 `autonomy_level`
+
+| Valor | Nome | Comportamento |
+|---|---|---|
+| `L0` | Estagiário | Só drafts. Humano aprova **tudo** |
+| `L1` | Júnior | Auto-posta; toda interação vai para revisão |
+| `L2` | Pleno | Auto-posta e auto-responde; revisão por amostragem (`L2_SAMPLING_RATE`, default 10%) |
+| `L3` | Sênior | Full auto; humano só vê alertas e métricas |
+
+**Transições permitidas:**
+
+```
+  L0 ──▶ L1 ──▶ L2 ──▶ L3          promoção: SEMPRE manual, um degrau por vez
+   ▲      ▲      ▲      │
+   │      │      └──────┘          rebaixamento: pode pular degraus
+   │      └─────────────┘          e pode ser AUTOMÁTICO (guardrail)
+   └────────────────────┘
+```
+
+- **Promoção** exige decisão humana explícita e nunca pula degrau. Critério sugerido: N dias sem violação `block`/`kill` e taxa de rejeição em amostragem abaixo do limiar.
+- **Rebaixamento** pode ser automático e pular degraus: uma violação `severity = 'kill'` leva de L3 direto a L0 (na prática, junto com `status = 'suspended'`).
+- **Fofoca nunca atinge L3.** Restrição de produto, não de schema — o ENUM permite, o guardrail proíbe. Ver [docs/08](08-guardrails-e-autonomia.md).
+
+### 4.3 `account_status`
+
+| Valor | Significado |
+|---|---|
+| `draft` | Criada no painel, ainda sem device/login |
+| `warming` | Em aquecimento: só consome conteúdo (assiste reels, segue, curte), não posta |
+| `active` | Operando normalmente |
+| `paused` | Pausada por humano |
+| `suspended` | Kill switch acionado (guardrail ou incidente) |
+| `lost` | Conta banida/perdida na plataforma |
+
+```
+   draft ──▶ warming ──▶ active ◄──────┐
+                            │          │
+                 ┌──────────┼──────────┤
+                 ▼          ▼          │
+             paused    suspended ──────┘  (retomada exige revisão humana)
+                 │          │
+                 └────┬─────┘
+                      ▼
+                    lost        ◄── terminal
+```
+
+Permitidas: `draft→warming`, `warming→active`, `warming→lost`, `active→paused`, `active→suspended`, `active→lost`, `paused→active`, `paused→lost`, `suspended→active` (só por humano), `suspended→lost`, qualquer → `lost`.
+Proibidas: `draft→active` (sem aquecimento é o caminho mais curto para o ban), `lost→qualquer`.
+
+### 4.4 `task_type`
+
+Três famílias. A família determina se a task toca device.
+
+| Família | Valores | Toca device? |
+|---|---|---|
+| **Produção** (roda no core) | `plan_day`, `produce_content`, `reflect` | Não |
+| **Execução** (vai ao orchestrator) | `publish_post`, `publish_story`, `publish_reels`, `like`, `comment`, `follow`, `unfollow`, `save`, `share`, `watch_reels`, `view_stories`, `send_dm`, `reply_comment` | **Sim** |
+| **Coleta** | `extract_content`, `collect_metrics`, `collect_interactions`, `monitor_check` | Sim (exceto quando via API) |
+
+Notas: `extract_content` é a task de **recon** — abrir um conteúdo alvo e extrair o que é; alimenta `campaign_recon`. `watch_reels` e `view_stories` não geram conteúdo: existem para produzir rastro de comportamento humano, especialmente em `warming`. Só a família de execução conta para `ACCOUNT_MAX_ACTIONS_PER_HOUR`.
+
+### 4.5 `platform`, `campaign_kind`, `monitor_status`, `memory_kind`, `source_kind`
+
+| ENUM | Valores | Observação |
+|---|---|---|
+| `platform` | `instagram`, `tiktok`, `whatsapp` | Sem transições. Conta não muda de plataforma |
+| `campaign_kind` | `content`, `engagement`, `mixed` | `engagement`/`mixed` **exigem recon** antes de planejar |
+| `monitor_status` | `active`, `paused`, `error`, `disabled` | `active↔paused` por humano; `active→error` automático por `consecutive_errors`; `error→active` só após intervenção; `disabled` é aposentadoria (não volta sem decisão explícita) |
+| `memory_kind` | `episodic`, `semantic`, `narrative` | `episodic` = diário bruto; `semantic` = fato consolidado, produzido pelo REFLECT a partir de episódicas; `narrative` = estado do arco. Sem transição: uma memória não muda de tipo, o REFLECT **cria** uma nova |
+| `source_kind` | `ig_account`, `tiktok_account`, `hashtag`, `keyword`, `rss`, `youtube_channel`, `live_stream`, `http_api` | Define o coletor. `ig_account`/`tiktok_account`/`hashtag` passam pelo farm Android; `rss`/`http_api` são HTTP puro |
+
+### 4.6 `task_status`
+
+```
+                    ┌──────────────────────────────────────┐
+                    │                                      │
+   ┌─────────┐  janela   ┌───────────┐  dispatcher  ┌────────────┐
+   │ pending │──────────▶│ scheduled │─────────────▶│ dispatched │
+   └────┬────┘           └─────┬─────┘              └──────┬─────┘
+        │                      │                           │ orchestrator
+        │                      │                           │ confirma início
+        │                      │                           ▼
+        │                      │                     ┌──────────┐
+        │                      │                     │ running  │
+        │                      │                     └────┬─────┘
+        │                      │                          │
+        │                      │              ┌───────────┴──────────┐
+        │                      │   verificado │                      │ erro
+        │                      │              ▼                      ▼
+        │                      │        ┌──────────┐           ┌────────┐
+        │                      │        │ verified │           │ failed │
+        │                      │        └──────────┘           └───┬────┘
+        │                      │          terminal ✔               │
+        │                      │                                   │ attempts <
+        │                      └───────────────────────────────────┘ max_attempts
+        │                                    (retry)
+        │
+        ├──── expires_at ultrapassado ────▶ ┌─────────┐  terminal ✘
+        │                                   │ expired │
+        │                                   └─────────┘
+        │
+        └──── humano / kill switch ───────▶ ┌───────────┐  terminal ✘
+                                            │ cancelled │
+                                            └───────────┘
+```
+
+| De → Para | Quando | Efeito colateral |
+|---|---|---|
+| `pending → scheduled` | Entrou na janela (`scheduled_for` ≤ agora, dentro de `active_hours`) | — |
+| `pending/scheduled → dispatched` | Dispatcher enviou ao orchestrator | grava `dispatched_at`, `external_task_id`, `attempts += 1` |
+| `dispatched → running` | Orchestrator confirmou início | — |
+| `dispatched → failed` | Falha de envio / device indisponível | `last_error` |
+| `running → verified` | Orchestrator **verificou** a execução | grava `verified_at`; cria `posts`; escreve memória e evento |
+| `running → failed` | Falha na execução | `last_error`, `result` |
+| `failed → scheduled` | Retry, se `attempts < max_attempts` | novo `scheduled_for` com backoff |
+| `pending/scheduled → expired` | `expires_at` < agora | Furo que perdeu validade |
+| `pending/scheduled/dispatched → cancelled` | Humano, kill switch ou campanha abortada | Cancelamento em voo exige aviso ao orchestrator |
+
+Terminais: `verified`, `cancelled`, `expired`, e `failed` quando `attempts >= max_attempts`.
+**Proibidas:** `dispatched → verified` (pular `running` mascara falha de verificação), qualquer transição saindo de terminal, e `verified → *`.
+
+### 4.7 `content_status`
+
+```
+   ┌───────┐   submete   ┌────────────┐
+   │ draft │────────────▶│ qa_pending │
+   └───────┘             └─────┬──────┘
+       ▲                       │
+       │ regenera        ┌─────┴──────────────┐
+       │            reprova              aprova no QA
+       │                 │                    │
+       │                 ▼            ┌───────┴────────┐
+       │          ┌───────────┐   exige humano    dispensa humano
+       │          │ qa_failed │   (L0, amostra,   (L1+, sem risco)
+       │          └─────┬─────┘    risco)              │
+       └────────────────┤          │                   │
+                        │          ▼                   │
+                        │  ┌──────────────────┐        │
+                        │  │ approval_pending │        │
+                        │  └───┬─────────┬────┘        │
+                        │      │         │             │
+                        │ rejeita     aprova/edita     │
+                        │      │         │             │
+                        │      ▼         ▼             ▼
+                        │ ┌──────────┐  ┌──────────────────┐
+                        │ │ rejected │  │     approved     │
+                        │ └────┬─────┘  └────────┬─────────┘
+                        │      │                 │ agenda
+                        │      │                 ▼
+                        │      │          ┌─────────────┐
+                        │      │          │  scheduled  │
+                        │      │          └──────┬──────┘
+                        │      │                 │ task verified
+                        │      │                 ▼
+                        │      │          ┌─────────────┐
+                        │      │          │  published  │
+                        │      │          └──────┬──────┘
+                        ▼      ▼                 ▼
+                     ┌──────────────────────────────┐
+                     │          archived            │  terminal
+                     └──────────────────────────────┘
+```
+
+| De → Para | Quando |
+|---|---|
+| `draft → qa_pending` | `ContentSource` terminou de produzir |
+| `qa_pending → qa_failed` | QA visual, textual, de marca ou legal reprovou |
+| `qa_pending → approval_pending` | QA passou, mas autonomia exige humano (**L0**, amostragem em **L2**, ou `rights_status='unknown'` / `claim_status='unverified'`) |
+| `qa_pending → approved` | QA passou e a autonomia dispensa humano (L1+ sem sinalização de risco) |
+| `qa_failed → draft` | Regeneração com o feedback do `qa_report` |
+| `qa_failed → archived` | Desistiu do item |
+| `approval_pending → approved` | Humano aprovou (ou editou: `approvals.decision='edited'` + `edited_payload`) |
+| `approval_pending → rejected` | Humano rejeitou |
+| `approved → scheduled` | Task de publicação criada, com jitter aplicado |
+| `scheduled → published` | Task correspondente atingiu `verified` |
+| `scheduled → archived` | Cancelado antes de ir ao ar |
+| `rejected → draft` | Retrabalho a partir da nota do humano |
+| `rejected → archived` | Descartado de vez |
+| `published → archived` | Despublicado / arquivado por retenção |
+
+**Proibidas e por quê:**
+- `draft → approved` — pular QA anula brand safety e checagem legal.
+- `draft/qa_pending → published` — nada é publicado sem passar por `approved` + `scheduled`.
+- `approved → published` sem passar por `scheduled` — o registro do agendamento com jitter é o que prova que o espalhamento foi aplicado.
+- `published → draft` — o que foi ao ar não volta a ser rascunho; crie um item novo.
+
+### 4.8 `campaign_status`
+
+```
+   ┌───────┐
+   │ draft │
+   └───┬───┘
+       │
+       ├──── kind='content' e sem alvo externo ──────────────┐
+       │                                                     │
+       │ kind IN ('engagement','mixed')                      │
+       ▼                                                     │
+  ┌────────────────┐   task extract_content   ┌────────────┐ │
+  │ recon_pending  │─────────────────────────▶│ recon_done │ │
+  └───────┬────────┘   + análise da LLM       └──────┬─────┘ │
+          │                                          │       │
+          │ safety_verdict='blocked'                  ▼       ▼
+          │                                    ┌────────────────┐
+          │                                    │   planning     │
+          │                                    └───────┬────────┘
+          │                                            │ participantes
+          │                                            │ + slots sorteados
+          │                                            ▼
+          │                                  ┌──────────────────┐
+          │                                  │ approval_pending │
+          │                                  └───┬──────────┬───┘
+          │                                      │          │ rejeita
+          │                             aprova   │          └────┐
+          │                                      ▼               │
+          │                                ┌──────────┐          │
+          │                                │ approved │          │
+          │                                └────┬─────┘          │
+          │                                     │ window_start   │
+          │                                     ▼                │
+          │                                ┌─────────┐           │
+          │                                │ running │           │
+          │                                └────┬────┘           │
+          │                     ┌───────────────┤                │
+          │        kill switch  │               │ window_end     │
+          ▼                     ▼               ▼                ▼
+      ┌─────────┐          ┌─────────┐   ┌───────────┐    ┌───────────┐
+      │ aborted │◄─────────┤ aborted │   │ completed │    │ cancelled │
+      └─────────┘          └─────────┘   └───────────┘    └───────────┘
+       terminal ✘                         terminal ✔       terminal ✘
+```
+
+| De → Para | Quando |
+|---|---|
+| `draft → recon_pending` | Campanha de engajamento/mista: task `extract_content` criada |
+| `draft → planning` | Campanha de conteúdo puro, sem alvo externo a inspecionar |
+| `draft → cancelled` | Descartada antes de começar |
+| `recon_pending → recon_done` | Captura + análise concluídas, `safety_verdict IN ('safe','risky')` |
+| `recon_pending → aborted` | `safety_verdict = 'blocked'`, ou recon falhou de forma irrecuperável |
+| `recon_done → planning` | Manager filtra contas elegíveis e monta o plano |
+| `recon_done → aborted` | Revisão humana vetou após ler a análise |
+| `planning → approval_pending` | Participantes e slots definidos; espera aval humano |
+| `planning → cancelled` | Nenhuma conta elegível, ou desistência |
+| `approval_pending → approved` | Humano aprovou o conjunto (participantes, textos, slots) |
+| `approval_pending → cancelled` | Humano rejeitou |
+| `approved → running` | `window_start` alcançado; tasks começam a ser despachadas |
+| `running → completed` | `window_end` alcançado e nenhuma task da campanha em voo |
+| `running → aborted` | Kill switch, guardrail `severity='kill'`, ou alvo mudou de contexto |
+
+**Diferença `cancelled` vs `aborted`:** `cancelled` = interrompida **antes** de qualquer ação no mundo. `aborted` = interrompida **depois** de já ter agido (ou com recon bloqueado). A distinção importa para o pós-morte: `aborted` exige runbook (o que já foi publicado? precisa remover?).
+
+**Proibidas:** `draft → planning` quando `kind IN ('engagement','mixed')` e `target_url IS NOT NULL` — planejar sem ver o alvo é o cenário de risco número um do subsistema. `planning → running` sem `approved` — campanha sempre passa por humano na v1, em qualquer nível de autonomia das contas participantes.
+
+---
+
+## 5. Índices
+
+Vinte e sete índices. Muitos são **parciais** (`WHERE ...`): indexam só a fatia quente da tabela. O ganho é duplo — índice menor (cabe em cache) e escrita mais barata (linha que não bate no predicado não entra no índice). É a técnica certa para tabelas onde 99% das linhas estão em estado terminal e as consultas só olham o 1% ativo.
+
+### 5.1 Índices parciais (o coração da operação)
+
+| Índice | Predicado | Consulta que serve |
+|---|---|---|
+| `idx_tasks_due` on `(scheduled_for, priority)` | `status IN ('pending','scheduled')` | **O tick do dispatcher.** A cada poucos segundos: "que tasks já venceram, em ordem de urgência?". Sem o predicado, o índice cresceria para sempre com tasks `verified` que ninguém mais consulta. A ordem das colunas importa: filtra por tempo, depois ordena por prioridade |
+| `idx_tasks_inflight` on `(external_task_id)` | `status IN ('dispatched','running')` | **Handler do webhook do orchestrator.** Chega um callback com `external_task_id`: encontra a task em voo em O(log n). Restringir a "em voo" também dá idempotência — reentrega de task já terminal não acha nada e é descartada |
+| `idx_content_pending_approval` on `(created_at)` | `status = 'approval_pending'` | **Fila de aprovação do painel**, em ordem de chegada. Fatia minúscula de `content_items`; o índice fica com dezenas de entradas mesmo com milhões de itens |
+| `idx_approvals_open` on `(requested_at)` | `decided_at IS NULL` | Aprovações abertas de qualquer tipo (conteúdo, campanha, interação). Serve o badge de pendências e o alerta de SLA de revisão |
+| `idx_interactions_pending` on `(account_id, received_at DESC)` | `replied_at IS NULL` | Fila de resposta por conta: "o que a Nina ainda não respondeu, mais recente primeiro" |
+| `idx_monitors_due` on `(next_check_at)` | `status = 'active'` | **Tick do scheduler de monitores** (Fase 4), gêmeo do `idx_tasks_due`. Monitores em `paused`/`error`/`disabled` não sujam o índice |
+| `idx_ingested_unconsumed` on `(ingested_at DESC)` | `consumed_by IS NULL` | Pauta disponível: itens ingeridos que nenhuma conta usou ainda, mais novos primeiro (furo velho não interessa) |
+| `idx_trends_live` on `(platform, kind, score DESC)` | `window_end IS NULL` | "Top 10 áudios em alta no Instagram agora". Tendências encerradas ficam para análise histórica, fora do caminho quente |
+| `idx_participants_slot` on `(slot_at)` | `NOT skipped` | Timeline de execução da campanha e verificação de jitter entre slots. Participantes pulados não entram — eles nunca serão executados |
+| `idx_accounts_status` on `(status)` | `status = 'active'` | Toda varredura periódica ("para cada conta ativa, ..."). Predicado quase redundante com a coluna indexada, mas mantém o índice do tamanho da frota operante, não do histórico |
+| `idx_arcs_account_active` on `(account_id)` | `active` | Contexto do PLAN: arcos vivos de uma conta. Arcos encerrados nunca entram em prompt |
+
+### 5.2 Índices completos
+
+| Índice | Colunas | Consulta que serve |
+|---|---|---|
+| `idx_accounts_archetype` | `(archetype)` | Filtro de elegibilidade de campanha e painéis por arquétipo |
+| `idx_accounts_client` | `(client_id)` | **[DORMENTE]** Isolamento por tenant (Fase 5) |
+| `idx_memories_account_kind` | `(account_id, kind, occurred_at DESC)` | Recuperação **por recência** dentro de um tipo — o fallback quando não há embedding e o filtro obrigatório por conta |
+| `idx_memories_embedding` | HNSW `(embedding vector_cosine_ops)` | Busca por **similaridade** (pgvector). HNSW dá recall alto com latência baixa; custa mais na escrita e mais RAM que IVFFlat. Escolhido porque memória é lida muito mais do que escrita |
+| `idx_content_account_status` | `(account_id, status)` | Painel da conta: "o que a Nina tem em cada estágio" |
+| `idx_campaigns_status` | `(status)` | Lista de campanhas por estado; alimenta o monitor de campanhas travadas |
+| `idx_recon_campaign` | `(campaign_id)` | Recon de uma campanha (lembrar: pegar o mais recente) |
+| `idx_tasks_account` | `(account_id, created_at DESC)` | Histórico de ações da conta; base do cálculo de rate limit por hora |
+| `idx_posts_account` | `(account_id, published_at DESC)` | Feed da conta no painel; "último post foi quando?" |
+| `idx_metrics_post` | `(post_id, collected_at DESC)` | Métrica mais recente de um post (`DISTINCT ON`) e série temporal |
+| `idx_monitor_hits_monitor` | `(monitor_id, detected_at DESC)` | Depuração de `trigger_rules`: os últimos hits de um monitor |
+| `idx_violations_recent` | `(created_at DESC)` | Mural de incidentes: "o que deu errado nas últimas 24h" em toda a frota |
+| `idx_events_account` | `(account_id, created_at DESC)` | Linha do tempo de uma conta |
+| `idx_events_type` | `(type, created_at DESC)` | Séries por tipo de evento (taxa de `content.qa_failed`/dia) |
+| `idx_events_trace` | `(trace_id)` | **Reconstruir uma decisão inteira.** É o índice que faz a auditoria ser consulta e não investigação |
+| `idx_llm_calls_time` | `(created_at DESC)` | Agregação de custo/latência por janela |
+
+### 5.3 Unicidades como regra de negócio
+
+| Constraint | O que impede |
+|---|---|
+| `accounts (platform, handle)` | Duas linhas para a mesma conta real — dois agentes brigando pelo mesmo device |
+| `persona_versions (account_id, version)` | Duas versões com o mesmo número; garante linha do tempo íntegra |
+| `day_plans (account_id, plan_date)` | Planejar o mesmo dia duas vezes (idempotência do PLAN) |
+| `sources (kind, endpoint)` | Cadastrar a mesma fonte duas vezes e dobrar a coleta |
+| `ingested_items (dedup_hash)` | Reprocessar o mesmo furo |
+| `campaign_participants (campaign_id, account_id)` | Mesma conta agir duas vezes na mesma campanha — padrão que denuncia automação |
+
+### 5.4 Faltas conhecidas
+
+Registradas aqui para não serem redescobertas como bug:
+
+- **Sem `UNIQUE (platform, external_id)` em `posts`** — reentrega de webhook pode duplicar. Guarda hoje é no código.
+- **Sem índice em `approvals (subject_type, subject_id)`** — buscar "as aprovações deste conteúdo" faz seq scan. Aceitável enquanto a tabela é pequena; adicionar quando passar de ~10⁵ linhas.
+- **Sem índice em `guardrail_violations (account_id, created_at DESC)`** — a query "violações desta conta" usa `idx_violations_recent` e filtra. Revisar quando a frota crescer.
+- **Sem índice em `content_items (campaign_id)`** — "conteúdo desta campanha" é seq scan.
+- **`llm_calls` sem índice em `trace_id`** — correlacionar chamada de LLM com evento por trace hoje é scan. Candidato imediato quando a auditoria virar rotina.
+
+---
+
+## 6. Consultas de referência
+
+Consultas testadas contra o schema da migração 0001. Servem de base para o código e para depuração via `make psql`.
+
+### 6.1 Tasks vencidas prontas para dispatch (o tick do dispatcher)
+
+Respeita janela, prioridade, expiração, `active_hours` da conta no fuso dela, e kill switch por status. `SKIP LOCKED` permite N workers sem coordenação externa.
+
+```sql
+WITH claimable AS (
+    SELECT t.id
+    FROM tasks t
+    JOIN accounts a ON a.id = t.account_id
+    WHERE t.status IN ('pending', 'scheduled')
+      AND t.scheduled_for <= now()
+      AND (t.expires_at IS NULL OR t.expires_at > now())
+      AND t.attempts < t.max_attempts
+      AND a.status = 'active'
+      -- só age dentro da janela "acordada", na hora local da persona
+      AND EXTRACT(HOUR FROM now() AT TIME ZONE a.timezone)::int
+          <@ a.active_hours
+    ORDER BY t.priority ASC, t.scheduled_for ASC
+    LIMIT 50
+    FOR UPDATE OF t SKIP LOCKED
+)
+UPDATE tasks t
+   SET status        = 'dispatched',
+       dispatched_at = now(),
+       attempts      = t.attempts + 1
+  FROM claimable c
+ WHERE t.id = c.id
+RETURNING t.id, t.account_id, t.type, t.payload, t.campaign_id, t.content_item_id;
+```
+
+> `idx_tasks_due` serve o `WHERE`+`ORDER BY`. O `JOIN` com `accounts` usa a PK. O `LIMIT 50` é o tamanho do lote por tick — ajuste com `WORKER_CONCURRENCY`.
+
+### 6.2 Fila de aprovação pendente
+
+Une as três origens de aprovação (conteúdo, campanha, interação) em uma fila só, com idade e tipo de revisão.
+
+```sql
+-- Conteúdo aguardando decisão humana
+SELECT
+    'content_item'                          AS subject_type,
+    ci.id                                   AS subject_id,
+    a.handle,
+    a.archetype,
+    a.autonomy,
+    ci.kind::text                           AS item_kind,
+    left(ci.caption, 120)                   AS preview,
+    ci.rights_status,
+    ci.claim_status,
+    ci.scheduled_for,
+    ci.created_at                           AS requested_at,
+    now() - ci.created_at                   AS idade,
+    ap.sampled
+FROM content_items ci
+JOIN accounts a         ON a.id = ci.account_id
+LEFT JOIN approvals ap  ON ap.subject_type = 'content_item'
+                       AND ap.subject_id  = ci.id
+                       AND ap.decided_at IS NULL
+WHERE ci.status = 'approval_pending'
+
+UNION ALL
+
+-- Interações pendentes de resposta que exigem humano
+SELECT
+    'interaction', i.id, a.handle, a.archetype, a.autonomy,
+    i.kind, left(i.body, 120),
+    NULL, NULL, NULL,
+    i.received_at, now() - i.received_at,
+    false
+FROM interactions i
+JOIN accounts a ON a.id = i.account_id
+WHERE i.replied_at IS NULL
+  AND (i.sensitive                       -- sensível nunca é auto-respondido
+       OR a.autonomy IN ('L0', 'L1'))    -- L0/L1 mandam tudo para revisão
+
+UNION ALL
+
+-- Campanhas aguardando aval
+SELECT
+    'campaign', c.id, NULL, NULL, NULL,
+    c.kind::text, left(c.brief, 120),
+    NULL, NULL, c.window_start,
+    c.updated_at, now() - c.updated_at, false
+FROM campaigns c
+WHERE c.status = 'approval_pending'
+
+ORDER BY idade DESC;
+```
+
+> Serve-se de `idx_content_pending_approval`, `idx_interactions_pending` e `idx_campaigns_status`. Ordenar por idade descrescente coloca o que está apodrecendo na fila no topo — é o que evita furo perdido por revisão esquecida.
+
+### 6.3 Recuperação de memória (similaridade × recência × importância)
+
+A fórmula do generative_agents, com os três eixos normalizados em 0..1 e somados com pesos. Recência é decaimento exponencial sobre `occurred_at`.
+
+```sql
+-- $1 = account_id
+-- $2 = embedding da consulta (vector(1024))
+-- $3 = meia-vida da recência em horas (ex.: 72)
+-- $4 = quantas memórias devolver (ex.: 12)
+WITH scored AS (
+    SELECT
+        m.id,
+        m.kind,
+        m.content,
+        m.importance,
+        m.occurred_at,
+        -- 1) RELEVÂNCIA: 1 - distância de cosseno  →  0..1
+        (1 - (m.embedding <=> $2::vector))                       AS relevance,
+        -- 2) RECÊNCIA: decaimento exponencial, meia-vida $3 horas → 0..1
+        exp(
+            -ln(2) * (EXTRACT(EPOCH FROM now() - m.occurred_at) / 3600.0) / $3
+        )                                                        AS recency,
+        -- 3) IMPORTÂNCIA: escala 0..10 atribuída pela LLM  →  0..1
+        (m.importance / 10.0)                                    AS importance_norm
+    FROM memories m
+    WHERE m.account_id = $1              -- NUNCA remover: isolamento entre agentes
+      AND m.embedding IS NOT NULL
+    ORDER BY m.embedding <=> $2::vector  -- usa o índice HNSW
+    LIMIT 200                            -- pré-filtro: top-200 por similaridade
+)
+SELECT
+    id, kind, content, importance, occurred_at,
+    round(relevance::numeric, 4)       AS relevance,
+    round(recency::numeric, 4)         AS recency,
+    round(importance_norm::numeric, 4) AS importance_norm,
+    round((1.0 * relevance + 1.0 * recency + 1.0 * importance_norm)::numeric, 4)
+        AS score
+FROM scored
+ORDER BY score DESC
+LIMIT $4;
+```
+
+**Notas de implementação.**
+- Os pesos `1.0 / 1.0 / 1.0` são os do paper. Ajuste por arquétipo: fofoca quer recência dominante (`0.7 / 2.0 / 0.5`); influencer quer narrativa (`1.0 / 0.8 / 1.5`).
+- O `LIMIT 200` interno é o que permite usar o índice HNSW: o ranking completo é calculado só sobre os candidatos mais similares. Sem ele, a query vira seq scan com aritmética em toda a tabela.
+- `<=>` é distância de cosseno (0 = idêntico). Por isso `1 - distância`.
+- Depois de usar as memórias no prompt, marque-as:
+  ```sql
+  UPDATE memories SET last_used_at = now() WHERE id = ANY($1::uuid[]);
+  ```
+
+### 6.4 Reconstruir a história de um post (`events` + `trace_id`)
+
+Do plano do dia à publicação verificada, incluindo cada chamada de LLM e cada intervenção humana.
+
+```sql
+-- $1 = posts.id
+WITH alvo AS (
+    SELECT p.id AS post_id, p.task_id, p.content_item_id, p.account_id
+    FROM posts p WHERE p.id = $1
+),
+-- o trace_id nasce no PLAN e é propagado; pegamos por qualquer elo conhecido
+traces AS (
+    SELECT DISTINCT e.trace_id
+    FROM events e, alvo t
+    WHERE e.trace_id IS NOT NULL
+      AND (e.task_id = t.task_id OR e.detail->>'content_item_id' = t.content_item_id::text)
+)
+SELECT * FROM (
+    SELECT e.created_at, 'event'    AS fonte, e.type       AS rotulo,
+           e.detail                 AS detalhe, e.trace_id
+    FROM events e JOIN traces tr ON tr.trace_id = e.trace_id
+
+    UNION ALL
+
+    SELECT l.created_at, 'llm_call',
+           l.purpose || ' @ ' || l.backend || '/' || l.model,
+           jsonb_build_object('tokens_in',  l.prompt_tokens,
+                              'tokens_out', l.output_tokens,
+                              'latency_ms', l.latency_ms,
+                              'cost_usd',   l.cost_usd,
+                              'success',    l.success,
+                              'error',      l.error),
+           l.trace_id
+    FROM llm_calls l JOIN traces tr ON tr.trace_id = l.trace_id
+
+    UNION ALL
+
+    SELECT ap.decided_at, 'approval',
+           ap.subject_type || ' → ' || coalesce(ap.decision, 'pendente'),
+           jsonb_build_object('by', ap.decided_by, 'note', ap.note,
+                              'sampled', ap.sampled),
+           NULL
+    FROM approvals ap, alvo t
+    WHERE ap.subject_id IN (t.content_item_id, t.post_id)
+
+    UNION ALL
+
+    SELECT gv.created_at, 'guardrail',
+           gv.rule || ' [' || gv.severity || ']',
+           gv.detail, NULL
+    FROM guardrail_violations gv, alvo t
+    WHERE gv.subject_id IN (t.content_item_id, t.post_id, t.task_id)
+) linha_do_tempo
+WHERE created_at IS NOT NULL
+ORDER BY created_at;
+```
+
+> Usa `idx_events_trace`. **É esta consulta que justifica a disciplina de propagar `trace_id`** — se o trace se perde entre o PLAN e o dispatch, a história aparece cortada ao meio. Considere adicionar índice em `llm_calls(trace_id)` (ver [5.4](#54-faltas-conhecidas)).
+
+### 6.5 Custo de LLM por dia e por backend
+
+```sql
+SELECT
+    date_trunc('day', created_at AT TIME ZONE 'America/Sao_Paulo')::date AS dia,
+    backend,
+    count(*)                                            AS chamadas,
+    count(*) FILTER (WHERE NOT success)                 AS falhas,
+    sum(prompt_tokens)                                  AS tokens_entrada,
+    sum(output_tokens)                                  AS tokens_saida,
+    round(avg(latency_ms))                              AS latencia_media_ms,
+    percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms) AS latencia_p95_ms,
+    round(sum(cost_usd), 4)                             AS custo_usd
+FROM llm_calls
+WHERE created_at >= now() - interval '30 days'
+GROUP BY ROLLUP (dia, backend)
+ORDER BY dia DESC NULLS LAST, custo_usd DESC NULLS LAST;
+```
+
+Variante operacional — **quanto já gastamos hoje em API externa** (compare com `LLM_DAILY_BUDGET_USD`):
+
+```sql
+SELECT
+    round(sum(cost_usd), 4) AS gasto_hoje_usd,
+    count(*)                AS chamadas_externas
+FROM llm_calls
+WHERE backend NOT LIKE 'mac_mini%'
+  AND created_at >= date_trunc('day', now() AT TIME ZONE 'America/Sao_Paulo');
+```
+
+E **onde o dinheiro está indo**, por propósito e por conta:
+
+```sql
+SELECT a.handle, l.purpose, count(*) AS chamadas, round(sum(l.cost_usd), 4) AS usd
+FROM llm_calls l
+LEFT JOIN accounts a ON a.id = l.account_id
+WHERE l.created_at >= now() - interval '7 days'
+GROUP BY 1, 2
+HAVING sum(l.cost_usd) > 0
+ORDER BY usd DESC
+LIMIT 25;
+```
+
+> `idx_llm_calls_time` serve todas as três.
+
+### 6.6 Contas que passaram do teto de ações/hora
+
+Só a família de **execução** conta (produção e coleta local não tocam device). Teto default: `ACCOUNT_MAX_ACTIONS_PER_HOUR = 12`.
+
+```sql
+-- $1 = teto de ações/hora (ex.: 12)
+WITH acoes AS (
+    SELECT
+        t.account_id,
+        date_trunc('hour', coalesce(t.verified_at, t.dispatched_at)) AS hora,
+        count(*) AS n
+    FROM tasks t
+    WHERE t.type IN (
+            'publish_post','publish_story','publish_reels',
+            'like','comment','follow','unfollow','save','share',
+            'watch_reels','view_stories','send_dm','reply_comment')
+      AND t.status IN ('dispatched','running','verified')
+      AND coalesce(t.verified_at, t.dispatched_at) >= now() - interval '24 hours'
+    GROUP BY 1, 2
+)
+SELECT
+    a.handle, a.platform, a.archetype, a.autonomy,
+    ac.hora, ac.n AS acoes_na_hora, $1 AS teto,
+    ac.n - $1 AS excedente
+FROM acoes ac
+JOIN accounts a ON a.id = ac.account_id
+WHERE ac.n > $1
+ORDER BY excedente DESC, ac.hora DESC;
+```
+
+Versão **preventiva**, a ser chamada pelo dispatcher antes de despachar (janela deslizante de 60 min, não hora cheia):
+
+```sql
+-- $1 = account_id ; $2 = teto
+SELECT count(*) >= $2 AS estourou
+FROM tasks
+WHERE account_id = $1
+  AND type NOT IN ('plan_day','produce_content','reflect')
+  AND status IN ('dispatched','running','verified')
+  AND coalesce(dispatched_at, created_at) > now() - interval '1 hour';
+```
+
+> A versão de hora cheia é **relatório**; a de janela deslizante é **guardrail**. Um farm detectado por rajada de 12 ações em 4 minutos passa ileso pela primeira e é barrado pela segunda.
+
+### 6.7 Campanhas aguardando recon
+
+```sql
+SELECT
+    c.id,
+    c.name,
+    c.kind,
+    c.status,
+    c.target_handle,
+    c.target_url,
+    c.window_start,
+    now() - c.updated_at                     AS parada_ha,
+    -- há task de recon? em que estado?
+    t.id                                     AS recon_task_id,
+    t.status                                 AS recon_task_status,
+    t.attempts,
+    t.last_error,
+    -- há recon já gravado?
+    r.captured_at,
+    r.analyzed_at,
+    r.safety_verdict,
+    CASE
+        WHEN t.id IS NULL                        THEN 'sem task de recon — criar'
+        WHEN t.status = 'failed'                 THEN 'recon falhou — ver last_error'
+        WHEN t.status = 'expired'                THEN 'recon expirou — realvo?'
+        WHEN r.captured_at IS NULL               THEN 'aguardando captura no device'
+        WHEN r.analyzed_at IS NULL               THEN 'capturado, aguardando LLM'
+        WHEN r.safety_verdict = 'blocked'        THEN 'BLOQUEADO — abortar campanha'
+        ELSE                                          'pronto para planning'
+    END                                      AS diagnostico
+FROM campaigns c
+LEFT JOIN LATERAL (
+    SELECT * FROM tasks
+    WHERE campaign_id = c.id AND type = 'extract_content'
+    ORDER BY created_at DESC LIMIT 1
+) t ON true
+LEFT JOIN LATERAL (
+    SELECT * FROM campaign_recon
+    WHERE campaign_id = c.id
+    ORDER BY created_at DESC LIMIT 1
+) r ON true
+WHERE c.status = 'recon_pending'
+ORDER BY c.window_start ASC;
+```
+
+> Os dois `LATERAL ... ORDER BY created_at DESC LIMIT 1` são a forma correta de pegar "o recon/task mais recente" — lembre que não há `UNIQUE (campaign_id)` em `campaign_recon` ([3.15](#315-campaign_recon)). Campanha em `recon_pending` com `window_start` no passado é incidente: a janela está queimando sem que nada tenha sido planejado.
+
+---
+
+## 7. Convenções de migração
+
+### 7.1 SQL puro, versionado
+
+Sem Alembic, sem autogeração. As migrações são arquivos `.sql` em [`db/migrations/`](../db/migrations/), aplicados em ordem lexicográfica por um runner simples (`make migrate`), que registra cada aplicação em `schema_migrations`.
+
+Por que SQL puro:
+
+- **O schema é o documento.** Alguém que abre `0001_initial.sql` lê o modelo inteiro, com comentários em português explicando *por que* cada campo existe. Um autogenerador produziria `op.add_column(...)` sem contexto.
+- **Índices parciais, HNSW, `int4range`, `CHECK`, triggers em `DO $$` — nada disso sobrevive bem a autogeração.** Metade do valor do nosso schema está exatamente nesses detalhes.
+- **Revisão de PR é leitura de SQL**, não de diff de modelo Python. É onde um `DROP COLUMN` acidental é pego.
+- **Zero dependência de framework de migração** — coerente com a ADR-0001 (core fino).
+
+Custo aceito: escrevemos o `UP` à mão e não temos `DOWN` automático (ver 7.4).
+
+### 7.2 Nomenclatura
+
+```
+NNNN_descricao_curta.sql
+```
+
+- `NNNN` — quatro dígitos, sequencial, **sem buracos**: `0001`, `0002`, `0003`.
+- `descricao_curta` — `snake_case`, em **português**, no infinitivo ou como substantivo do que a migração faz. Consistente com "documentação em português, identificadores em inglês": o nome do arquivo é documentação.
+- Sem timestamp no nome. Ordem sequencial explícita evita o clássico "duas branches criaram `20260805_x`" com ordem de aplicação ambígua.
+
+Exemplos válidos:
+
+```
+0001_initial.sql
+0002_indice_llm_calls_trace.sql
+0003_check_kind_content_items.sql
+0004_particiona_post_metrics.sql
+0005_acorda_ingestao_fase4.sql
+```
+
+**Colisão de número** entre branches: quem faz merge por último renumera. É trabalho manual de 30 segundos e é o preço de ter ordem determinística.
+
+### 7.3 Nunca edite migração já aplicada
+
+**Regra absoluta.** Migração aplicada em qualquer ambiente compartilhado (staging, produção — e, na prática, no banco do colega) é imutável.
+
+Mecanismo de defesa: o runner grava `schema_migrations.checksum` (SHA-256 do arquivo) e **compara a cada execução**. Divergência = falha imediata com a lista de arquivos alterados. Não existe flag para ignorar.
+
+Por quê:
+- O banco já foi transformado. Editar o arquivo não desfaz o `ALTER TABLE` que rodou ontem — só cria a ilusão de que o histórico é outro.
+- Ambientes divergem em silêncio: o seu banco tem a coluna, o de produção não, e o SQL parece o mesmo nos dois lugares.
+- A trilha de auditoria do schema morre — e este é um projeto cujo princípio nº 3 é auditoria.
+
+**O que fazer em vez disso:**
+
+| Situação | Ação |
+|---|---|
+| Erro de digitação em migração já aplicada | Nova migração corrigindo |
+| Coluna que não deveria existir | Nova migração com `DROP COLUMN` (e prazo de carência, ver 7.5) |
+| Migração ainda **não** aplicada em lugar nenhum, nem no seu banco local, nem em branch de outra pessoa | Pode editar. Este é o único caso |
+| Migração aplicada só no seu local, mas já **enviada** | Trate como imutável: outra pessoa pode ter rodado |
+
+### 7.4 Estrutura de um arquivo de migração
+
+```sql
+-- =============================================================================
+-- Olimpo — Migração 0002: índice de trace em llm_calls
+-- =============================================================================
+-- Motivo: a consulta de auditoria (docs/02 § 6.4) faz seq scan em llm_calls
+-- ao correlacionar por trace_id. Com ~40k chamadas/dia isso já custa ~800ms.
+--
+-- Reversão: DROP INDEX CONCURRENTLY idx_llm_calls_trace;
+-- =============================================================================
+
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_llm_calls_trace
+    ON llm_calls(trace_id) WHERE trace_id IS NOT NULL;
+```
+
+Convenções de conteúdo:
+
+1. **Cabeçalho obrigatório** com número, título, *motivo* e como reverter. O motivo é o que faz a migração ser legível daqui a um ano.
+2. **Uma migração = uma mudança coerente.** Não junte "adiciona coluna de fofoca" com "corrige índice de tasks".
+3. **`IF NOT EXISTS` / `IF EXISTS`** sempre que possível — torna a reaplicação inofensiva.
+4. **Idempotência onde der.** O runner protege com `schema_migrations`, mas migração idempotente sobrevive a intervenção manual atrapalhada.
+5. **Sem `DOWN` automático.** Reversão é descrita em comentário e, quando realmente necessária, escrita como uma migração nova (`0009_reverte_0008.sql`). Downgrade automático em produção com dados é ilusão de segurança.
+6. **DDL pesada fora de transação.** `CREATE INDEX CONCURRENTLY` e `ALTER TYPE ... ADD VALUE` não rodam dentro de bloco transacional; sinalize no cabeçalho para o runner não envolver o arquivo em `BEGIN/COMMIT`.
+7. **Migração de dados vai em arquivo separado** da migração de schema, com `LIMIT`/lote quando a tabela for grande.
+
+### 7.5 Mudanças perigosas: o padrão em três passos
+
+Para qualquer mudança que possa quebrar código em execução (renomear, remover, apertar `NOT NULL`), use expansão → migração → contração, em **três migrações separadas** e três deploys:
+
+| Passo | Migração | Deploy |
+|---|---|---|
+| **Expandir** | Cria a nova coluna, nullable, com default | Código passa a escrever nos **dois** lugares |
+| **Migrar** | Backfill em lotes | Código passa a ler do novo |
+| **Contrair** | `DROP` do antigo, aplica `NOT NULL` | Código para de escrever no antigo |
+
+Nunca faça `ALTER TABLE ... RENAME COLUMN` em uma tacada: entre o `COMMIT` e o deploy do código novo existe uma janela em que a aplicação está quebrada.
+
+Casos específicos deste schema:
+
+- **`ALTER TYPE ... ADD VALUE`** (novo valor de ENUM) não é transacional e não é revertível. Adicione o valor numa migração isolada, faça deploy, e só então use o valor.
+- **Trocar a dimensão de `memories.embedding`** exige recriar a coluna e re-embeddar toda a memória. Trate como projeto, não como migração ([3.6](#36-memories)).
+- **Novo campo mutável** exige adicionar o trigger `touch_updated_at` na mesma migração se a tabela for nova ([3.25](#325-triggers-de-updated_at)).
+
+### 7.6 Checklist de revisão de migração
+
+- [ ] O número é o próximo da sequência, sem buraco e sem colisão.
+- [ ] O cabeçalho diz **por que**, não só o quê.
+- [ ] Nenhum arquivo já aplicado foi tocado (o checksum confirma).
+- [ ] Coluna nova ou tabela nova está documentada em `docs/02` (esta página) na mesma PR.
+- [ ] Se dormente, está marcada `[DORMENTE]` **com a fase em que acorda**.
+- [ ] Índice novo tem uma consulta real que o justifica — se possível, com `EXPLAIN` antes/depois no corpo da PR.
+- [ ] `DROP`/`NOT NULL`/`RENAME` seguem o padrão de três passos ([7.5](#75-mudanças-perigosas-o-padrão-em-três-passos)).
+- [ ] Tabela nova e mutável ganhou o trigger de `updated_at`.
+- [ ] Rodou em banco limpo (`make reset && make migrate`) **e** em cópia de banco com dados.
+
+---
+
+## Ver também
+
+- [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade
+- [ADR-0001](adr/0001-core-proprio.md) — por que core próprio; por que o modelo de dados é nosso
+- [docs/04 — Persona Card](04-persona-card-spec.md) — o schema de `accounts.persona_card`
+- [docs/05 — Loop do agente](05-loop-do-agente.md) — quem escreve em qual tabela, em qual passo
+- [docs/06 — Campanhas](06-campanhas.md) — `spread_policy`, recon e espalhamento
+- [docs/08 — Guardrails e autonomia](08-guardrails-e-autonomia.md) — catálogo de `rule` e política por nível
+- [docs/11 — Observabilidade](11-observabilidade.md) — catálogo de `events.type` e propagação de `trace_id`
+- [docs/glossario.md](glossario.md) — mapeamento PT ↔ EN

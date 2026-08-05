@@ -1,0 +1,13 @@
+# Carrega os dashboards versionados em ops/grafana/dashboards/.
+# Os painéis que precisam existir estão listados em docs/11-observabilidade.md.
+apiVersion: 1
+
+providers:
+  - name: Olimpo
+    orgId: 1
+    folder: Olimpo
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards

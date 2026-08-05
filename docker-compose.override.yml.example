@@ -1,0 +1,24 @@
+# Ajustes locais que NÃO vão para o versionamento.
+#   cp docker-compose.override.yml.example docker-compose.override.yml
+#
+# O Docker Compose carrega este arquivo automaticamente por cima do
+# docker-compose.yml. Use para o que é específico da sua máquina.
+
+services:
+  # Exemplo: Mac minis em outra máquina da rede, não no host local.
+  litellm:
+    environment:
+      MAC_MINI_1_URL: http://192.168.1.50:11434
+      MAC_MINI_2_URL: http://192.168.1.51:11434
+
+  # Exemplo: menos worker durante o desenvolvimento.
+  worker:
+    command: >
+      celery -A olimpo.workers.app worker
+      --loglevel=DEBUG --queues=realtime,dispatch,production,maintenance
+      --concurrency=2
+
+  # Exemplo: expor o Postgres em outra porta para não conflitar com um
+  # Postgres já instalado na máquina.
+  postgres:
+    ports: ["55432:5432"]

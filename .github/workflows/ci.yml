@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    name: Lint e testes (Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -e ".[dev]"
+
+      - name: ruff
+        run: ruff check src/ tests/
+
+      - name: mypy
+        run: mypy src/
+        continue-on-error: true   # endurecer quando a Fase 1 fechar
+
+      - name: pytest
+        run: pytest tests/unit -q
+        env:
+          DISPATCH_ENABLED: "false"
+
+  docs:
+    name: Documentação
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Documentação que aponta para arquivo inexistente promete uma resposta
+      # que não existe. Ver scripts/check_docs.py.
+      - name: Links internos
+        run: python scripts/check_docs.py
+
+  migrations:
+    name: Migrações aplicam em banco limpo
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: olimpo
+          POSTGRES_PASSWORD: olimpo
+          POSTGRES_DB: olimpo
+        options: >-
+          --health-cmd "pg_isready -U olimpo"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+        ports: ["5432:5432"]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -e ".[dev]"
+
+      - name: Aplicar migrações
+        run: python -m olimpo.db.migrate up
+        env:
+          DATABASE_URL: postgresql://olimpo:olimpo@localhost:5432/olimpo
+
+      # Roda duas vezes: migração precisa ser idempotente.
+      - name: Reaplicar (deve ser no-op)
+        run: python -m olimpo.db.migrate up
+        env:
+          DATABASE_URL: postgresql://olimpo:olimpo@localhost:5432/olimpo
+
+  panel:
+    name: Painel (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: panel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - run: npm install
+      - run: npm run typecheck
+      - run: npm run build
