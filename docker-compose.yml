@@ -24,6 +24,10 @@ x-python-common: &python-common
   volumes:
     - ./src:/app/src
     - ./db:/app/db
+    # Sem isto o `make test` não acha os testes: eles rodam DENTRO do
+    # container, onde as dependências existem.
+    - ./tests:/app/tests
+    - ./pyproject.toml:/app/pyproject.toml:ro
     - media:/app/media
     - ./dryrun:/app/dryrun
   # Os serviços externos (orchestrator, máquina de influencers, android-manager)

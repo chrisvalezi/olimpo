@@ -39,6 +39,9 @@ body {
            text-xs text-slate-400 transition-colors hover:bg-surface-border/40 hover:text-slate-200
            disabled:opacity-50;
   }
+  select.input, textarea.input {
+    @apply bg-surface;
+  }
   .metric {
     @apply font-mono text-2xl font-semibold tabular-nums text-slate-100;
   }

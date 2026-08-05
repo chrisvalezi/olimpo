@@ -165,9 +165,8 @@ ALTER TABLE orchestrator_nodes
 
 ALTER TABLE account_placements
     ADD COLUMN device_id uuid REFERENCES devices(id) ON DELETE SET NULL,
-    -- Usuário Android em execução. ⚠️ NÃO é "está na tela": o Android
-    -- mantém vários usuários rodando ao mesmo tempo, e o orchestrator
-    -- reporta todos como ativos. Qual está em primeiro plano ele não diz.
+    -- Qual usuário Android está em primeiro plano naquele container. Só um
+    -- por vez: trocar de conta é trocar o usuário do device inteiro.
     ADD COLUMN foreground boolean NOT NULL DEFAULT false;
 
 -- =============================================================================

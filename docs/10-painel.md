@@ -177,35 +177,127 @@ Convenção das tabelas abaixo: **endpoint** é o contrato da FastAPI; **tabelas
 
 ---
 
-### 4.2 Contas
+### 4.2 Contas e personas
+
+> **Uma conta é um login numa plataforma; a identidade por trás dela é a persona, que pode ter vários logins** ([ADR-0013](adr/0013-persona-separada-da-conta.md)). São duas telas porque são duas coisas, e cada uma responde a uma pergunta diferente: *"onde está esse login e ele está operando?"* × *"quem é essa personagem?"*.
+
+**O princípio que manda nesta tela: com quatro mil contas, cartão não serve.** Uma grade de cartões bonitos é ótima para vinte contas e inútil para quatro mil — não cabe na tela, não carrega no navegador e não deixa agir sobre um conjunto. O que o operador precisa é **varrer, filtrar e agir em lote**: tabela densa, paginada no servidor, com facetas contadas no banco e seleção múltipla. É a mesma lógica de §1.3 e §1.6, levada ao caso em que o volume é a dificuldade principal.
 
 #### Lista — `/contas`
 
-**Propósito.** Encontrar uma conta e ler o estado da frota linha a linha.
+**Propósito.** Achar um login entre milhares, entender o estado da frota linha a linha e agir sobre um conjunto de uma vez.
+
+**Paginada no banco, nunca na tela.** `GET /v1/accounts` devolve uma página (`page`, `per_page` até 500, default 50), o total e o número de páginas. Trazer tudo e filtrar no cliente derruba o navegador e some com o tempo de resposta — e é o erro que esta tela existe para não cometer.
+
+**Busca.** Um campo só, que procura em quatro lugares: `handle` (índice trigrama, busca "contém" — o operador digita pedaço, não prefixo), `external_id` exato, `jid` (telefone do WhatsApp) e **nome da persona**. Achar a conta pelo nome da personagem é o caminho natural quando se sabe quem, não qual login.
+
+**Facetas clicáveis, contadas no banco.** Acima da tabela, uma linha por eixo, com a contagem de cada valor:
+
+```
+plataforma   [IG 2891] [WA 940] [TT 173]
+situação     [cadastrada 1204] [ativa 1902] [aquecendo 611] [pausada 190] [perdida 97]
+presença     [em device 1740] [sem sinal 402] [sumida 118] [sem device 1744]
+papel        [agente 3388] [coletora 511] [utilitária 105]
+sem persona  [ 862 sem identidade vinculada ]
+```
+
+As contagens vêm **sem filtro aplicado**, numa única consulta agregada: são o mapa da operação inteira, e é a partir delas que o operador decide o que olhar primeiro. Clicar alterna o filtro; clicar de novo remove.
 
 | Filtro | Campo |
 |---|---|
-| Arquétipo | `accounts.archetype` (influencer · gossip · clipper) |
-| Status | `accounts.status` (draft · warming · active · paused · suspended · lost) |
-| Autonomia | `accounts.autonomy` (L0–L3) |
-| Cliente | `accounts.client_id` → `clients.name` *(oculto até a Fase 5)* |
 | Plataforma | `accounts.platform` |
-| Busca | `handle` (índice `pg_trgm`) |
+| Situação | `accounts.status` (registered · warming · active · paused · suspended · lost) |
+| Presença | calculada dos placements (online · stale · missing · unbound) — [docs/02 § 3.35](02-modelo-de-dados.md#335-situação--presença-dois-eixos-ortogonais) |
+| Papel | `accounts.role` (agent · collector · utility) |
+| Arquétipo | `accounts.archetype` (influencer · gossip · clipper · messaging · collector) |
+| Autonomia | `accounts.autonomy` (L0–L3) |
+| Rótulo | `accounts.labels` (índice gin) |
+| Persona | `accounts.persona_id`, e o atalho `unbound` para "sem identidade vinculada" |
+| Cliente | `accounts.client_id` → `clients.name` *(oculto até a Fase 5)* |
+| Busca | `q` sobre handle (trigrama), `external_id`, `jid` e nome da persona |
 
-Colunas: handle · plataforma · arquétipo · `AutonomyBadge` · status · seguidores · última ação (`last_action_at`, relativa) · posts 7 d · aprovações pendentes · saúde do device · cadência real vs. `accounts.cadence`.
+Colunas: **conta** (badge de plataforma + handle + marcador de observações, com arquétipo e papel na segunda linha) · **persona** (ou *sem persona*, em cinza) · **situação** · **presença** (com `×N` quando o login está em mais de um device) · seguidores · autonomia · **visto** (`last_seen_in_inventory`, relativo).
 
-`GET /v1/accounts?archetype=&status=&autonomy=&client_id=&q=&page=`
+**Situação e presença são duas colunas de propósito.** Uma diz o que queremos; a outra, o que a realidade responde. Ver uma conta `ativa` e `sumida` na mesma linha é exatamente o que faz o operador agir — e é informação que um campo só apagaria.
 
-Ações em lote (com seleção): pausar, retomar, mudar de nível de autonomia (uma confirmação por conta, nunca em massa — ver §8).
+**Ordenação:** handle · seguidores · criação · último visto · situação. Feita no banco, junto com a paginação.
+
+**Seleção múltipla e ações em lote.** Caixa por linha e caixa no cabeçalho (marca a página inteira). Com algo selecionado, aparece uma barra com a contagem e as ações: mudar situação · mudar papel · vincular à persona · desvincular · adicionar rótulos · remover rótulos · mudar autonomia. Teto de **2000 ids** por chamada.
+
+> **O que NÃO entra no lote:** apagar (§8, e nem existe no endpoint) e promoção de autonomia sem confirmação por conta. Rebaixar em massa é contenção e é legítimo; promover em massa é abrir mão da supervisão de 500 contas com um clique.
+
+**Cadastrar conta é o primeiro passo, não o último.** `Nova conta` pede plataforma, handle, papel e (opcionalmente) persona. **O login é cadastrado antes de existir em qualquer device** — o vínculo com o container aparece sozinho quando o inventário o encontrar. Era a ordem impossível no modelo antigo, em que a conta só existia se um device a revelasse. O arquétipo é validado contra a plataforma (WhatsApp aceita `messaging`/`collector`; Instagram e TikTok, os de conteúdo).
+
+`GET /v1/accounts?q=&platform=&status=&role=&archetype=&autonomy=&presence=&label=&persona_id=&unbound=&sort=&page=&per_page=` · `POST /v1/accounts` · `POST /v1/accounts/bulk`
 
 #### Ficha da conta — `/contas/[id]`
 
-O documento vivo de um agente. Cabeçalho fixo com handle, `AutonomyBadge`, status, device, e os botões de controle. Abaixo, abas.
+Tudo sobre um login. Cabeçalho com badge de plataforma, handle, presença, `external_id`, idade e — quando houver — a linha *"já se chamou: …"* vinda de `previous_handles`.
+
+| Bloco | Conteúdo |
+|---|---|
+| **Identidade e operação** | handle · **persona vinculada** (select, com a opção explícita *"— sem identidade vinculada —"*) · situação · autonomia · papel · arquétipo · `external_id` · telefone/JID (só WhatsApp) · rótulos · fuso |
+| **Inventário** | seguidores, seguindo, publicações — com o aviso de que vêm da varredura, não de digitação |
+| **Dados da conta** | `accounts.profile`: e-mail, e-mail de recuperação, telefone, nascimento, criada em, origem, proxy, geo, 2FA — **campos sugeridos, não schema fechado**; chaves extras são aceitas e editáveis |
+| **Onde está a credencial** | `accounts.secret_ref`, em bloco próprio com ícone de chave: *"referência ao cofre, não a senha em si — esta coluna não é cifrada"* |
+| **Onde esta conta roda** | os `account_placements`: servidor, container, usuário Android, logada/deslogada, aviso de watchdog, idade do último avistamento. Sem placement, o texto diz que a conta existe normalmente e só não tem onde operar |
+| **Observações** | `entity_notes` datadas, com autor e fixação. Diferente do campo de anotação livre acima: aqui nada é sobrescrito |
+| **Zona de risco** | apagar a conta e todo o histórico, em bloco separado com borda vermelha |
+
+**Faixa de presença.** Quando `presence = 'missing'`, uma faixa âmbar no topo diz em texto: *"Esta conta não aparece no inventário há mais de um dia. **Ela não foi perdida** — o cadastro, a persona e o histórico continuam aqui. O que sumiu foi o login dentro do device."* É a resposta à pergunta que o operador faz, no lugar em que ele a faz.
+
+**Zona de risco, e por que ela é feia de propósito.** Apagar cascateia conteúdo, posts, tasks e aprovações. O botão exige digitação (`apagar`) e a API recusa sem `confirm=apagar-de-verdade`, respondendo com a alternativa correta: **conta banida deve virar `perdida`** — o histórico é o que explica por que ela caiu. Ver §8.
+
+**Campos livres com formulário guiado.** `profile` é `jsonb` sem schema porque cada operação tem seus campos; o painel oferece os nove mais comuns e deixa acrescentar quaisquer outros. É a única forma de o formulário não virar migração toda semana.
+
+`GET /v1/accounts/{id}` (conta + placements com servidor/container/device + observações + últimas tasks) · `PATCH /v1/accounts/{id}` · `POST /v1/accounts/{id}/notes` · `DELETE /v1/notes/{id}` · `DELETE /v1/accounts/{id}?confirm=apagar-de-verdade`
+
+> **Desvincular persona precisa de campo próprio.** Em `PATCH`, `null` significa *"não mexer"* — não *"apague o vínculo"*. Por isso o corpo tem `unbind_persona: true` como campo separado. É detalhe de contrato, e é o tipo de coisa que, sem estar escrita, vira um bug de "não consigo tirar a persona errada dessa conta".
+
+> **Trocar o handle empilha o anterior** em `previous_handles`. A conta não sumiu, ela se renomeou — e concluir o contrário é como se perde histórico.
+
+#### Personas — `/personas`
+
+**Propósito.** A identidade, separada do login. A Luna Prado existe mesmo que nenhuma conta exista, e o Instagram e o WhatsApp dela são a **mesma** personagem, com uma memória só.
+
+Um cartão por persona — e aqui cartão **cabe**, porque personas são dezenas, não milhares. Cada um mostra nome, `slug`, nicho principal do card, contagem de memórias, arco ativo, e a lista de **logins vinculados** (badge de plataforma, handle, situação, seguidores), cada um linkando para a ficha da conta.
+
+| Elemento | O que mostra |
+|---|---|
+| Busca | por nome da persona |
+| Aviso de card vazio | faixa âmbar: *"Sem persona card. Sem ele a LLM não tem voz para escrever — a conta não deve sair de L0"* |
+| Sem logins | *"nenhum login vinculado"* — persona cadastrada e ainda sem conta é estado válido |
+| `Nova persona` | nome, `slug` (derivado do nome se vazio), descrição, `persona_engine_id`, rótulos, observações |
+
+`GET /v1/personas?q=` · `POST /v1/personas` · `POST /v1/personas/{id}/notes`
+
+#### Editor da persona — `/personas/[id]`
+
+O card em dois modos, alternáveis por um botão, editando o **mesmo** objeto.
+
+| Modo | Para quem | Como funciona |
+|---|---|---|
+| **Guiado** | quem está escrevendo a personagem | Blocos com rótulo em português e texto de ajuda dizendo *por que* o campo existe — identidade, voz, visual, nicho, tabus. Listas viram uma linha por item; textos longos viram área |
+| **JSON** | quem já conhece a spec | O card inteiro, cru, com validação de sintaxe antes de salvar. O modo guiado cobre os blocos mais editados; **o resto do card continua acessível só por aqui** |
+
+Alternar entre os modos preserva o conteúdo: sair do JSON reinterpreta o texto; entrar no JSON serializa o que o modo guiado montou. JSON inválido bloqueia o salvamento com a mensagem do parser, em vez de gravar pela metade.
+
+**Salvar o card incrementa a versão.** `PATCH /v1/personas/{id}` com `persona_card` incrementa `personas.persona_version` e grava o snapshot em `persona_versions` — *"por que ela mudou de voz?"* precisa continuar respondível ([docs/04 § 5](04-persona-card-spec.md#5-versionamento)). A ficha também lista os logins vinculados, os arcos e as observações da persona.
+
+`GET /v1/personas/{id}` (persona + contas + arcos + observações) · `PATCH /v1/personas/{id}`
+
+> ❓ O editor ainda **não** exige `change_note` nem mostra diff lado a lado das versões, que a spec de persona pede. O histórico é gravado; a interface para lê-lo ainda não existe.
+
+---
+
+#### Abas da conta — planejadas
+
+O restante da ficha do agente, ainda por implementar. A tabela abaixo é especificação, não estado atual.
 
 | Aba | Conteúdo | Endpoint / tabelas |
 |---|---|---|
 | **Visão** | `AccountCard` expandido, arco ativo, plano de hoje, últimas 5 tasks, alerta de guardrail recente | `GET /v1/accounts/{id}` → `accounts`, `story_arcs` (`active`), `day_plans` de hoje, `tasks`, `guardrail_violations` |
-| **Persona** | `PersonaCard` — leitura formatada de `accounts.persona_card` por seção (identidade, voz, tabus, estética, linha editorial, `persona_engine_id`); editor com diff e histórico | `GET/PUT /v1/accounts/{id}/persona`, `GET /v1/accounts/{id}/persona/versions` → `accounts.persona_card`, `accounts.persona_version`, `persona_versions` |
+| **Persona** | `PersonaCard` — leitura formatada de `personas.persona_card` por seção (identidade, voz, tabus, estética, linha editorial, `persona_engine_id`), com link para o editor da persona. **A edição não é por conta:** o card é da personagem e vale para todos os logins dela | `GET /v1/personas/{id}` → `personas`, `persona_versions` |
 | **Memória** | linha do tempo de `memories` filtrável por `kind` (episódica · semântica · narrativa), com `importance` como peso visual e busca semântica | `GET /v1/accounts/{id}/memories?kind=&q=` → `memories` (busca por `embedding`, ordenação por `occurred_at`) |
 | **Arco** | arco atual (`title`, `summary`, `state`), régua de `starts_at`→`ends_at`, arcos passados | `GET /v1/accounts/{id}/arcs` → `story_arcs` |
 | **Agenda** | plano do dia: `narrative`, `intents` como cartões, `reasoning` no `ReasoningPanel`, e as tasks derivadas na `TaskTimeline` com `active_hours` sombreado | `GET /v1/accounts/{id}/day-plan?date=` → `day_plans`, `tasks` |
@@ -214,7 +306,7 @@ O documento vivo de um agente. Cabeçalho fixo com handle, `AutonomyBadge`, stat
 | **Interações** | comentários/DMs desta conta, sensíveis no topo | `interactions` |
 | **Eventos** | auditoria bruta, agrupável por `trace_id` | `events` |
 
-**Edição de persona com versionamento.** Salvar não sobrescreve: a API grava o card anterior em `persona_versions` (`version`, `changed_by`, `change_note`), incrementa `accounts.persona_version` e emite um evento. A UI exige `change_note` — "por que ela mudou de voz?" é uma pergunta que precisa ter resposta. O editor mostra diff lado a lado (JSON estruturado, não texto cru) e valida contra o schema zod derivado de `docs/04-persona-card-spec.md`.
+**Edição de persona com versionamento.** Salvar não sobrescreve: a API grava o card anterior em `persona_versions` (`version`, `changed_by`, `change_note`), incrementa `personas.persona_version` e emite um evento. A UI deve exigir `change_note` — "por que ela mudou de voz?" é uma pergunta que precisa ter resposta — e mostrar diff lado a lado (JSON estruturado, não texto cru), validando contra o schema zod derivado de `docs/04-persona-card-spec.md`. ❓ Hoje o editor grava a versão mas não pede a nota nem mostra o diff.
 
 **Ações da ficha:**
 
@@ -226,7 +318,9 @@ O documento vivo de um agente. Cabeçalho fixo com handle, `AutonomyBadge`, stat
 | **Promover/rebaixar autonomia** | altera `accounts.autonomy` | **dupla** para promoção; simples para rebaixamento |
 | Forçar `plan_day` | cria task `plan_day` imediata | simples |
 | Editar cadência / `active_hours` | `accounts.cadence`, `accounts.active_hours` | simples |
-| Editar persona | nova linha em `persona_versions` | simples, com `change_note` obrigatório |
+| Vincular / desvincular persona | `accounts.persona_id`; desvincular usa `unbind_persona: true` | simples |
+| Editar persona | nova linha em `persona_versions` (na tela da persona, não na da conta) | simples, com `change_note` obrigatório |
+| **Apagar conta** | cascateia conteúdo, posts, tasks e aprovações | **dupla, com digitação** (§8). Conta banida deve virar `perdida` |
 
 ---
 
@@ -655,16 +749,27 @@ Fundo não é preto puro: `#0B0D10`. Preto puro sobre OLED cria halo em texto br
 
 ### 7.2 Cor com significado
 
-**Status de conta** (`account_status`):
+**Situação da conta** (`account_status`) — o que *nós* queremos:
 
-| Status | Cor | Token | Leitura |
+| Situação | Rótulo na tela | Cor | Token | Leitura |
+|---|---|---|---|---|
+| `registered` | cadastrada | cinza | `--st-draft` `#6B7280` | existe, não opera |
+| `warming` | aquecendo | âmbar | `--st-warming` `#D97706` | aquecendo, só consome |
+| `active` | ativa | verde | `--st-active` `#16A34A` | operando |
+| `paused` | pausada | azul-acinzentado | `--st-paused` `#64748B` | pausa humana, reversível |
+| `suspended` | suspensa | vermelho | `--st-suspended` `#DC2626` | kill switch — exige ação |
+| `lost` | perdida | vinho apagado | `--st-lost` `#7F1D1D` | banida; fica no sistema de propósito |
+
+**Presença** — o que a *realidade* diz, calculada dos placements ([docs/02 § 3.35](02-modelo-de-dados.md#335-situação--presença-dois-eixos-ortogonais)). Escala própria, **nunca a de situação**, porque são eixos ortogonais e confundi-los é o erro que a tela existe para evitar:
+
+| Presença | Rótulo na tela | Cor | Leitura |
 |---|---|---|---|
-| `draft` | cinza | `--st-draft` `#6B7280` | existe, não opera |
-| `warming` | âmbar | `--st-warming` `#D97706` | aquecendo, só consome |
-| `active` | verde | `--st-active` `#16A34A` | operando |
-| `paused` | azul-acinzentado | `--st-paused` `#64748B` | pausa humana, reversível |
-| `suspended` | vermelho | `--st-suspended` `#DC2626` | kill switch — exige ação |
-| `lost` | vinho apagado | `--st-lost` `#7F1D1D` | banida, arquivo |
+| `online` | em device | verde | logada num container visto na última hora |
+| `stale` | sem sinal | âmbar | sem confirmação do inventário há mais de uma hora |
+| `missing` | sumida | vermelho | fora do inventário há mais de um dia — **não é o mesmo que perdida** |
+| `unbound` | sem device | cinza escuro | nunca esteve num device, ou o vínculo foi removido |
+
+**Papel** (`accounts.role`): `agent` agente · `collector` coletora · `utility` utilitária. Sem cor própria — aparece como texto secundário abaixo do handle, porque é qualificador, não estado.
 
 **Severidade de alerta** (`guardrail_violations.severity`):
 
@@ -731,6 +836,7 @@ Três níveis.
 | **Aprovar campanha** | `APROVAR` | nº de contas, nº de ações, janela, resumo da `spread_policy`, veredito do recon |
 | **Ligar `DISPATCH_ENABLED`** | `PRODUCAO` | aviso de que ações passam a acontecer em contas reais |
 | **Abortar campanha em execução** | `ABORTAR` | ações já verificadas (irreversíveis) vs. canceláveis |
+| **Apagar conta** | `apagar` | o que cascateia (conteúdo, posts, tasks, aprovações) e a alternativa: **conta banida deve virar `perdida`**. A API recusa sem `confirm=apagar-de-verdade` |
 
 Regras que valem para as três:
 

@@ -1,7 +1,9 @@
 # 04 — Persona Card: especificação
 
-> O JSON armazenado em `accounts.persona_card`, versionado em `persona_versions`.
+> O JSON armazenado em **`personas.persona_card`**, versionado em `persona_versions`.
 > Formato inspirado no **character file do ElizaOS** ([ADR-0001](adr/0001-core-proprio.md) § 2), adaptado à nossa arquitetura: adotamos o *shape* — não importamos código.
+
+> ⚠️ **Mudou de casa na migração 0007.** Até a 0006 o card vivia em `accounts.persona_card`, uma linha por login. Desde a [ADR-0013](adr/0013-persona-separada-da-conta.md) ele vive em `personas.persona_card`: **uma persona, um card, vários logins.** `accounts.persona_card` continua existindo como herança até a `0008` e **não é fonte da verdade** — ler de lá devolve o card velho em silêncio. Ver [1.4](#14-onde-o-card-mora).
 
 **Índice**
 
@@ -17,7 +19,7 @@
 
 ## 1. Filosofia: contrato, não sugestão
 
-O Persona Card é a **alma da conta**. Ele responde quem ela é, como fala, o que jamais diria, com que cara aparece na foto e em que ritmo vive. Não é documentação — é dado operacional lido em tempo de execução.
+O Persona Card é a **alma da personagem** — não do login. Ele responde quem ela é, como fala, o que jamais diria, com que cara aparece na foto e em que ritmo vive. Não é documentação — é dado operacional lido em tempo de execução.
 
 ### 1.1 As três leis
 
@@ -43,6 +45,34 @@ O Persona Card é a **alma da conta**. Ele responde quem ela é, como fala, o qu
 - **Não é o arco narrativo.** `story_arcs` é o que está acontecendo agora; o card é quem ela é independente do arco.
 - **Não é o humor do dia.** `accounts.mood` modula o tom dentro dos limites do card — nunca contra ele.
 - **Não é configuração de rate limit.** `accounts.cadence` (coluna) é o teto operacional; `cadence` (bloco do card) é intenção editorial. Quando divergem, **o banco vence**.
+- **Não é o login.** Handle, credencial, proxy, e-mail, device e situação operacional são da conta, não da personagem. O card descreve quem ela é; a conta descreve onde ela está logada.
+
+---
+
+### 1.4 Onde o card mora
+
+```
+personas                    ← O CARD VIVE AQUI. Um por personagem.
+  persona_card    jsonb        voz, tabus, estética, lore, cadência
+  persona_version integer      inteiro monotônico, incrementado a cada edição
+  persona_engine_id text       referência facial na máquina de influencers
+  │
+  ├─ accounts  @luna.prado         (instagram)  ─┐
+  ├─ accounts  Luna · 11 9xxxx     (whatsapp)   ─┤ o MESMO card vale
+  └─ accounts  @lunaprado.corta    (tiktok)     ─┘ para os três
+```
+
+**Uma persona pode ter vários logins, e o card vale para todos.** A Luna do Instagram e a Luna do WhatsApp são a mesma personagem: mesma voz, mesmos tabus, mesma memória, mesmos arcos. Era exatamente isso que o modelo antigo não conseguia dizer — dois logins eram duas identidades sem relação, cada uma com um card que divergia no primeiro dia ([ADR-0013](adr/0013-persona-separada-da-conta.md)).
+
+Três consequências práticas:
+
+| Consequência | Detalhe |
+|---|---|
+| **Editar o card é editar a persona** | `PATCH /v1/personas/{id}` com `persona_card`. O endpoint incrementa `personas.persona_version` e grava em `persona_versions`. Não existe mais edição de card por conta |
+| **Conta sem persona não tem card, e isso é válido** | `accounts.persona_id IS NULL` é o caso normal das coletoras, que só observam e nunca publicam. Elas não precisam de voz porque não escrevem nada. Não force um card vazio para "preencher" |
+| **Persona sem card não deve sair de `L0`** | `persona_card = '{}'` significa *card por escrever*, não *sem persona*. Sem voz declarada, a LLM escreve genérico e o QA não tem contra o que validar. O painel marca essas personas com aviso |
+
+**O card é da personagem; o ritmo é do login.** `accounts.cadence`, `accounts.active_hours`, `accounts.timezone` e `accounts.mood` continuam por conta, porque quem age é o login: a mesma personagem pode postar 1×/dia no Instagram e responder mensagens o dia inteiro no WhatsApp. O bloco `cadence` do card é a intenção editorial dela em geral; o teto real é o da conta que vai executar.
 
 ---
 
@@ -74,10 +104,12 @@ O Persona Card é a **alma da conta**. Ele responde quem ela é, como fala, o qu
 | Campo | Tipo | Obrigatório | Descrição |
 |---|---|---|---|
 | `schema_version` | `string` | sim | Versão **do formato**. `"1.0"` hoje. Muda só em mudança de estrutura |
-| `version` | `integer` | sim | Versão **desta persona**. Espelha `accounts.persona_version` e `persona_versions.version` |
-| `archetype` | `enum` | sim | `influencer` \| `gossip` \| `clipper`. Precisa bater com `accounts.archetype` |
+| `version` | `integer` | sim | Versão **desta persona**. Espelha `personas.persona_version` e `persona_versions.version` |
+| `archetype` | `enum` | sim | `influencer` \| `gossip` \| `clipper`. Precisa bater com o arquétipo das contas de conteúdo vinculadas |
 
 Os blocos `editorial` e `curation` são **condicionais ao arquétipo** (ver [6](#6-validação)). Todos os demais são obrigatórios para os três arquétipos.
+
+> **Persona com vários logins e o cruzamento com `accounts.archetype`.** O arquétipo é da conta e é imutável ([docs/02 § 4.1](02-modelo-de-dados.md#41-archetype)); a persona agora pode ter mais de uma. Na prática os arquétipos de conteúdo (`influencer`, `gossip`, `clipper`) não se misturam numa mesma personagem, e as contas `messaging`/`collector` da mesma persona não produzem conteúdo — logo não confrontam o card. ❓ A regra exata do validador para persona com contas de arquétipos divergentes ainda não foi implementada; até lá, trate como convenção: **um arquétipo de conteúdo por persona**.
 
 ---
 
@@ -88,7 +120,7 @@ Os blocos `editorial` e `curation` são **condicionais ao arquétipo** (ver [6](
   "identity": {
     "name": "Manuela Sarti",        // nome completo fictício
     "display_name": "Manu Sarti",   // como aparece no perfil
-    "handle": "manusarti",          // sem @; deve bater com accounts.handle
+    "handle": "manusarti",          // sem @; o login principal da persona
     "apparent_age": 27,             // idade aparente, não data de nascimento
     "location": {
       "city": "Belo Horizonte",
@@ -109,7 +141,7 @@ Os blocos `editorial` e `curation` são **condicionais ao arquétipo** (ver [6](
 |---|---|---|---|
 | `name` | `string` | sim | Nome completo fictício. **Nunca** o de pessoa real |
 | `display_name` | `string` | sim | Nome no perfil |
-| `handle` | `string` | sim | Sem `@`. Validação cruza com `accounts.handle` |
+| `handle` | `string` | sim | Sem `@`. É o **login principal** da persona — o @ que ela usa na bio e que aparece nos textos. Com vários logins vinculados, ele não identifica mais a conta: quem identifica é `accounts.id`. ❓ O cruzamento de validação precisa passar a ser "existe uma conta desta persona com este handle", não igualdade com `accounts.handle` |
 | `apparent_age` | `integer` | sim | Idade **aparente**. Mínimo 18 — persona menor de idade é bloqueio duro |
 | `location` | `object` | sim | Cidade/estado/país fictícios mas plausíveis. Ancora gíria, clima e cenário |
 | `occupation` | `string` | sim | Ocupação declarada. Delimita autoridade: quem não é nutricionista não passa dieta |
@@ -187,7 +219,7 @@ Bloco **crítico** para influencer. `face_reference` é o que garante que a pess
   "visual": {
     "canonical_description": "Mulher branca de 27 anos, 1,68m, corpo atlético com ombros marcados, cabelo castanho-escuro liso na altura do ombro geralmente preso em coque baixo, sobrancelhas grossas, olhos castanhos, sardas leves no nariz, sem maquiagem pesada.",
     "face_reference": {
-      "persona_engine_id": "pe_9f3c21a7",   // == accounts.persona_engine_id
+      "persona_engine_id": "pe_9f3c21a7",   // == personas.persona_engine_id
       "seed": 774213908,                     // seed fixa — NÃO alterar
       "reference_image_ids": ["ref_face_001", "ref_face_002", "ref_body_001"],
       "locked": true                         // true = nenhuma mudança sem humano
@@ -222,7 +254,7 @@ Bloco **crítico** para influencer. `face_reference` é o que garante que a pess
 | Campo | Tipo | Obrig. | Notas |
 |---|---|---|---|
 | `canonical_description` | `string` | sim | Descrição física **canônica**, uma só. Vai para todo prompt de imagem |
-| `face_reference.persona_engine_id` | `string` | **sim p/ influencer** | ID na máquina de influencers. Sem ele não há geração consistente |
+| `face_reference.persona_engine_id` | `string` | **sim p/ influencer** | ID na máquina de influencers, espelhando `personas.persona_engine_id`. Sem ele não há geração consistente. Como é da persona, **os vários logins dela mostram a mesma pessoa** — que é o ponto |
 | `face_reference.seed` | `integer` | **sim p/ influencer** | Seed fixa. **Alterar = outra pessoa.** Bloqueado por validação |
 | `face_reference.reference_image_ids` | `string[]` | sim p/ influencer | Imagens canônicas; base do QA por embedding de rosto |
 | `face_reference.locked` | `boolean` | sim p/ influencer | `true` impede qualquer alteração automática |
@@ -438,10 +470,10 @@ Bloco de **guardrail**. Cada item é regra checável, não recomendação.
 
 | Campo | Tipo | Obrig. | Notas |
 |---|---|---|---|
-| `posts_per_day` | `number` | sim | Intenção editorial. Teto real é `accounts.cadence` |
+| `posts_per_day` | `number` | sim | Intenção editorial da personagem. **Teto real é `accounts.cadence`, do login que vai executar** — e cada login tem o seu |
 | `stories_per_day` | `number` | sim | |
 | `reels_per_week` | `number` | não | |
-| `preferred_hours` | `int[]` | sim | Horas locais (0–23). Devem cair dentro de `accounts.active_hours` |
+| `preferred_hours` | `int[]` | sim | Horas locais (0–23). Devem cair dentro de `accounts.active_hours` do login que executa |
 | `story_hours` | `int[]` | não | |
 | `most_active_days` | `string[]` | sim | `seg`..`dom` |
 | `quiet_days` | `string[]` | não | Dias de silêncio. **Silêncio é sinal de humanidade** |
@@ -1116,35 +1148,42 @@ Legenda: **●** completo · **◐** parcial (campos indicados) · **○** ausen
 
 ### 5.1 Como funciona
 
-`accounts.persona_card` guarda o card **vigente**; `accounts.persona_version` guarda o número. `persona_versions` guarda o **histórico completo**: um snapshot inteiro por versão, nunca diff ([docs/02 § 3.4](02-modelo-de-dados.md#34-persona_versions)).
+`personas.persona_card` guarda o card **vigente**; `personas.persona_version` guarda o número. `persona_versions` guarda o **histórico completo**: um snapshot inteiro por versão, nunca diff ([docs/02 § 3.4](02-modelo-de-dados.md#34-persona_versions)).
 
 Toda alteração é uma transação:
 
 ```sql
 BEGIN;
 
+-- snapshot do card que está SAINDO, uma linha por login vinculado
 INSERT INTO persona_versions (account_id, version, persona_card, changed_by, change_note)
-SELECT id, persona_version, persona_card,
+SELECT a.id, p.persona_version, p.persona_card,
        'human:chris',
        'reduz emoji de moderado para raro; a voz estava soando promocional'
-FROM accounts WHERE id = $1;   -- snapshot do card que está SAINDO
+FROM personas p
+JOIN accounts a ON a.persona_id = p.id
+WHERE p.id = $1
+ON CONFLICT (account_id, version) DO NOTHING;
 
-UPDATE accounts
+UPDATE personas
    SET persona_card    = $2,
        persona_version = persona_version + 1
  WHERE id = $1;
 
 INSERT INTO events (account_id, type, detail, trace_id)
-VALUES ($1, 'persona.version_bumped',
-        jsonb_build_object('from', $3::int, 'to', $3::int + 1,
-                           'fields_changed', $4::jsonb,
-                           'changed_by', 'human:chris'),
-        $5);
+SELECT a.id, 'persona.version_bumped',
+       jsonb_build_object('persona_id', $1, 'from', $3::int, 'to', $3::int + 1,
+                          'fields_changed', $4::jsonb,
+                          'changed_by', 'human:chris'),
+       $5
+FROM accounts a WHERE a.persona_id = $1;
 
 COMMIT;
 ```
 
-O snapshot gravado é sempre o **anterior**. Assim, `persona_versions` contém a história e `accounts` contém o presente — sem duplicação do card vigente.
+O snapshot gravado é sempre o **anterior**. Assim, `persona_versions` contém a história e `personas` contém o presente — sem duplicação do card vigente.
+
+> ⚠️ **`persona_versions` ainda é chaveada por `account_id`.** A tabela nasceu quando o card era da conta, e a chave `UNIQUE (account_id, version)` continua valendo — por isso uma persona com três logins gera três linhas por bump, com o mesmo número e o mesmo snapshot, e o `ON CONFLICT DO NOTHING` protege reexecução. Uma persona **sem nenhum login vinculado não gera histórico algum**: o `INSERT ... SELECT` não encontra linhas. Migrar a tabela para `persona_id` é dívida declarada da `0008` ([ADR-0013](adr/0013-persona-separada-da-conta.md) § Consequências).
 
 ### 5.2 Quando bumpar
 
@@ -1207,10 +1246,11 @@ SELECT p.published_at,
              WHERE pv.account_id = p.account_id
                AND pv.created_at > p.published_at
              ORDER BY pv.version ASC LIMIT 1) - 1,
-           a.persona_version
+           per.persona_version
        ) AS persona_version_vigente
 FROM posts p
-JOIN accounts a ON a.id = p.account_id
+JOIN accounts a       ON a.id = p.account_id
+LEFT JOIN personas per ON per.id = a.persona_id   -- NULL se a conta não tem persona
 WHERE p.id = $1;
 ```
 
@@ -1229,10 +1269,10 @@ Nenhum card inválido entra no banco. A validação roda no serviço, antes do `
 | Regra | Erro |
 |---|---|
 | `schema_version` presente e suportado | `PERSONA_SCHEMA_UNSUPPORTED` |
-| `version` inteiro ≥ 1 e = `accounts.persona_version + 1` no bump | `PERSONA_VERSION_MISMATCH` |
-| `archetype` presente e **igual** a `accounts.archetype` | `PERSONA_ARCHETYPE_MISMATCH` |
+| `version` inteiro ≥ 1 e = `personas.persona_version + 1` no bump | `PERSONA_VERSION_MISMATCH` |
+| `archetype` presente e **igual** ao arquétipo das contas de conteúdo da persona | `PERSONA_ARCHETYPE_MISMATCH` |
 | Blocos presentes: `identity`, `voice`, `visual`, `personality`, `lore`, `niche`, `taboos`, `cadence`, `commercial` | `PERSONA_BLOCK_MISSING` |
-| `identity.handle` = `accounts.handle` | `PERSONA_HANDLE_MISMATCH` |
+| `identity.handle` corresponde a **alguma** conta vinculada à persona | `PERSONA_HANDLE_MISMATCH` |
 | `identity.apparent_age` ≥ 18 | `PERSONA_AGE_INVALID` |
 | `identity.language` é BCP-47 válido | `PERSONA_LANGUAGE_INVALID` |
 | **`voice.examples` com ao menos 5 e no máximo 12 itens** | `PERSONA_VOICE_EXAMPLES_INSUFFICIENT` |
@@ -1244,8 +1284,8 @@ Nenhum card inválido entra no banco. A validação roda no serviço, antes do `
 | `taboos.never_interactions` ≥ 3 | `PERSONA_TABOOS_INSUFFICIENT` |
 | `niche.primary` não vazio e com > 3 palavras (impede "fitness") | `PERSONA_NICHE_TOO_BROAD` |
 | `niche.content_pillars[].share` soma entre 0.95 e 1.05 | `PERSONA_PILLARS_SHARE_INVALID` |
-| `cadence.preferred_hours` ⊆ `accounts.active_hours` | `PERSONA_HOURS_OUTSIDE_ACTIVE_WINDOW` |
-| `cadence.posts_per_day` ≤ `accounts.cadence.posts_per_day` | `PERSONA_CADENCE_EXCEEDS_ACCOUNT` |
+| `cadence.preferred_hours` ⊆ `accounts.active_hours` da conta que executa | `PERSONA_HOURS_OUTSIDE_ACTIVE_WINDOW` |
+| `cadence.posts_per_day` ≤ `accounts.cadence.posts_per_day` da conta que executa | `PERSONA_CADENCE_EXCEEDS_ACCOUNT` |
 | `commercial.disclosure.required = true` quando `accepts_sponsored = true` | `PERSONA_DISCLOSURE_REQUIRED` |
 | Nenhuma palavra de `voice.slang.uses` também em `voice.slang.never` | `PERSONA_SLANG_CONTRADICTION` |
 | Nenhum item de `commercial.allowed_categories` também em `blocked_categories` | `PERSONA_COMMERCIAL_CONTRADICTION` |
@@ -1254,7 +1294,7 @@ Nenhum card inválido entra no banco. A validação roda no serviço, antes do `
 
 | Arquétipo | Regra adicional | Erro |
 |---|---|---|
-| **`influencer`** | `visual.face_reference.persona_engine_id` presente **e igual** a `accounts.persona_engine_id` | `PERSONA_FACE_REFERENCE_REQUIRED` |
+| **`influencer`** | `visual.face_reference.persona_engine_id` presente **e igual** a `personas.persona_engine_id` | `PERSONA_FACE_REFERENCE_REQUIRED` |
 | | `visual.face_reference.seed` presente e inteiro | `PERSONA_FACE_SEED_REQUIRED` |
 | | `visual.face_reference.reference_image_ids` com ≥ 2 itens | `PERSONA_FACE_REFS_INSUFFICIENT` |
 | | `identity.ai_disclosure` não vazio | `PERSONA_AI_DISCLOSURE_REQUIRED` |
@@ -1306,7 +1346,7 @@ Não impedem o `INSERT`, mas aparecem no painel:
 
 | Momento | O que roda |
 |---|---|
-| `POST`/`PUT` de persona na API | Validação completa (6.1–6.3). Rejeita com lista de erros |
+| `POST /v1/personas` e `PATCH /v1/personas/{id}` | Validação completa (6.1–6.3). Rejeita com lista de erros. ❓ **Ainda não implementada** no router: hoje o card entra como `jsonb` livre e só o painel avisa. É lacuna conhecida, não desenho |
 | `make seed` | Idem — seed inválido falha o build |
 | Antes de todo prompt | Checagem barata de presença dos blocos exigidos por aquela chamada |
 | Passo QA do loop | Validação **da saída** contra o card: `banned_words`, `caption_length.max`, emoji, contagem de hashtag, `never_say`, `claim_labeling`, `attribution` |
@@ -1320,7 +1360,7 @@ Não impedem o `INSERT`, mas aparecem no painel:
 
 > **O agente pode propor mudanças no próprio card. Não pode aplicá-las.**
 
-O passo REFLECT do loop pode concluir que a persona precisa mudar ("as respostas mais curtas engajaram mais", "o público reage melhor quando ela fala do joelho"). Essa conclusão vira **proposta**, registrada em `approvals` com `subject_type = 'persona_change'` e `subject_id` apontando para a conta. Nada é aplicado sem `decision = 'approved'`.
+O passo REFLECT do loop pode concluir que a persona precisa mudar ("as respostas mais curtas engajaram mais", "o público reage melhor quando ela fala do joelho"). Essa conclusão vira **proposta**, registrada em `approvals` com `subject_type = 'persona_change'` e `subject_id` apontando para a **persona** (era a conta antes da 0007). Nada é aplicado sem `decision = 'approved'`.
 
 > `persona_change` é um quarto valor de `approvals.subject_type` além dos três documentados na migração 0001. Como a coluna é `text` e não ENUM ([docs/02 § 3.21](02-modelo-de-dados.md#321-approvals)), não há migração envolvida — mas o valor precisa entrar no catálogo do painel junto com esta spec.
 
@@ -1328,8 +1368,8 @@ O passo REFLECT do loop pode concluir que a persona precisa mudar ("as respostas
 
 | Onde | O que | Por quê é seguro |
 |---|---|---|
-| `accounts.mood` | Humor e energia do dia | Estado dinâmico, dentro de `personality.mood_range`. Modula o tom, não redefine |
-| `memories` | Escrever episódicas, semânticas e narrativas | É a memória, não a identidade |
+| `accounts.mood` | Humor e energia do dia | Estado dinâmico **do login**, dentro de `personality.mood_range`. Modula o tom, não redefine |
+| `memories` | Escrever episódicas, semânticas e narrativas | É a memória da personagem (`persona_id`), não a identidade |
 | `story_arcs.state` | Avançar o arco corrente | Arco é história em curso, não personagem |
 | `day_plans` | Planejar e replanejar o dia | Operação normal |
 | `content_items` | Produzir conteúdo dentro do card | O card é a restrição, não o produto |
@@ -1355,7 +1395,8 @@ Formato da proposta:
 ```json
 {
   "type": "persona.change_proposed",
-  "account_id": "…",
+  "persona_id": "…",
+  "observed_on_account_id": "…",
   "from_version": 3,
   "path": "voice.caption_length.typical",
   "current": 220,
@@ -1417,7 +1458,9 @@ Tentativa de propor nesses caminhos gera `guardrail_violations` com `rule = 'per
 
 ## Ver também
 
-- [docs/02 — Modelo de dados](02-modelo-de-dados.md) — `accounts.persona_card`, `persona_versions`
+- [docs/02 — Modelo de dados](02-modelo-de-dados.md) — [`personas`](02-modelo-de-dados.md#332-personas), `persona_versions`
+- [ADR-0013](adr/0013-persona-separada-da-conta.md) — por que o card saiu de `accounts` e foi para `personas`
+- [docs/10 — Painel](10-painel.md) — o editor do card, em modo guiado e em modo JSON
 - [docs/05 — Loop do agente](05-loop-do-agente.md) — em que passo cada bloco é lido
 - [docs/06 — Campanhas](06-campanhas.md) — `campaign_adapt` e limite de crossover entre `house_agents`
 - [docs/08 — Guardrails e autonomia](08-guardrails-e-autonomia.md) — como `taboos` vira regra executável

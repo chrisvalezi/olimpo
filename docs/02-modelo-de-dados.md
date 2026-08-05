@@ -1,6 +1,6 @@
 # 02 — Modelo de dados
 
-> Fonte da verdade: os arquivos em [`db/migrations/`](../db/migrations/) — [`0001_initial.sql`](../db/migrations/0001_initial.sql) para o núcleo, [`0002_orchestrator_nodes.sql`](../db/migrations/0002_orchestrator_nodes.sql) para a ligação com o orchestrator, [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) para servidores, serviços, devices e inventário de contas.
+> Fonte da verdade: os arquivos em [`db/migrations/`](../db/migrations/) — [`0001_initial.sql`](../db/migrations/0001_initial.sql) para o núcleo, [`0002_orchestrator_nodes.sql`](../db/migrations/0002_orchestrator_nodes.sql) para a ligação com o orchestrator, [`0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) e [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) para servidores, serviços, devices e inventário de contas, e [`0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) para a separação entre persona, login e lugar onde ele roda ([ADR-0013](adr/0013-persona-separada-da-conta.md)).
 > Este documento **descreve** aqueles arquivos. Se os dois divergirem, o SQL vence e este documento está com bug.
 
 Postgres 16 + três extensões: `uuid-ossp` (chaves), `vector` (pgvector, memória semântica), `pg_trgm` (busca aproximada em texto — dedup e QA de caption).
@@ -138,7 +138,34 @@ O preço aceito é polling (o dispatcher acorda a cada poucos segundos) e press�
    └────────────────────┘
 ```
 
-**Leitura do mapa em uma frase:** `accounts` é o centro; tudo que é *vida* (memória, arco, plano) pende dela; tudo que é *trabalho* (conteúdo → task → post → métrica) flui da esquerda para a direita; campanhas injetam trabalho lateralmente; ingestão alimenta conteúdo por baixo; governança observa tudo por fora.
+**Leitura do mapa em uma frase:** `accounts` é o centro; tudo que é *trabalho* (conteúdo → task → post → métrica) flui da esquerda para a direita; campanhas injetam trabalho lateralmente; ingestão alimenta conteúdo por baixo; governança observa tudo por fora.
+
+> ⚠️ O mapa acima é o da migração 0001, quando `accounts` também era a identidade. **A migração 0007 tirou a *vida* de cima do login** ([ADR-0013](adr/0013-persona-separada-da-conta.md)): memória, arcos e planos do dia pendem agora de `personas`. Leia o trecho abaixo por cima do mapa.
+
+```
+   ┌────────────┐  a IDENTIDADE: nome, slug, persona_card, persona_engine_id
+   │  personas  │  existe mesmo sem login nenhum
+   └─────┬──────┘
+         │ persona_id (NULO é válido: coletora não tem persona)
+         │
+         ├───────────────┬───────────────┬───────────────┐
+         ▼               ▼               ▼               ▼
+   ┌────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
+   │  accounts  │  │  memories  │  │ story_arcs │  │ day_plans  │
+   │ os LOGINS  │  └────────────┘  └────────────┘  └────────────┘
+   └─────┬──────┘        └──── a vida da personagem, uma só ────┘
+         │ account_id
+         ▼
+   ┌────────────────────┐  ONDE cada login está rodando agora.
+   │ account_placements │  Sumir daqui não apaga nada.
+   └────────────────────┘
+
+   ┌──────────────┐  observações datadas sobre conta, persona, device
+   │ entity_notes │  ou servidor — polimórfica, sem FK
+   └──────────────┘
+```
+
+**Três coisas, três ciclos de vida.** A personagem existe antes de qualquer login e sobrevive à perda de todos eles. O login pode ser banido e recriado. O lugar onde ele roda muda toda semana. Empilhar as três em uma linha só foi o que a 0007 desfez.
 
 ### 2.1 FKs criadas depois (ciclos)
 
@@ -158,7 +185,7 @@ Quatro FKs são adicionadas via `ALTER TABLE` no fim da migração porque formam
 
 ## 3. Tabelas
 
-Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança → **infraestrutura** ([3.26](#326-infraestrutura-um-servidor-vários-serviços) em diante, migrações 0005/0006).
+Ordem: controle → tenants → contas → memória → ingestão → monitores → tendências → conteúdo → campanhas → tasks → publicações → governança → **infraestrutura** ([3.26](#326-infraestrutura-um-servidor-vários-serviços) a [3.31](#331-campos-novos-em-accounts-e-account_placements), migrações 0005/0006) → **identidade** ([3.32](#332-personas) em diante, migração 0007).
 
 Convenções desta seção:
 - Todas as colunas `id uuid` usam `DEFAULT uuid_generate_v4()`, exceto `events.id` (`bigserial`).
@@ -199,7 +226,9 @@ Tenant. Existe porque clipagem é tipicamente serviço prestado a terceiros, e c
 
 ### 3.3 `accounts`
 
-A unidade central do sistema: **1 linha = 1 conta de rede social = 1 agente**. Tudo que o Olimpo faz é atribuível a uma linha desta tabela.
+**1 linha = 1 login numa plataforma.** Tudo que o Olimpo faz é atribuível a uma linha desta tabela.
+
+> ⚠️ Até a migração 0006, a frase acima era *"1 conta = 1 agente"*, e `accounts` era também a identidade. **Não é mais.** A identidade é [`personas`](#332-personas) ([ADR-0013](adr/0013-persona-separada-da-conta.md)): uma persona pode ter vários logins (o Instagram e o WhatsApp da mesma personagem), e um login pode não ter persona nenhuma (as coletoras). Os campos que a 0007 acrescentou estão em [3.34](#334-campos-novos-em-accounts-migração-0007).
 
 | Coluna | Tipo | Descrição |
 |---|---|---|
@@ -207,13 +236,13 @@ A unidade central do sistema: **1 linha = 1 conta de rede social = 1 agente**. T
 | `handle` | `text` obrig. | @ da conta, sem o `@` |
 | `platform` | `platform` obrig. | `instagram` \| `tiktok` \| `whatsapp` |
 | `archetype` | `archetype` = `influencer` | Define qual `ContentSource` o loop usa no passo SOURCE |
-| `status` | `account_status` = `draft` | Ciclo de vida operacional da conta |
+| `status` | `account_status` = `registered` | **Situação:** o que *nós* queremos da conta. Era `draft` até a 0007 — ver [3.35](#335-situação--presença-dois-eixos-ortogonais) |
 | `autonomy` | `autonomy_level` = `L0` | Quanto o agente pode fazer sem humano |
 | `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
-| `persona_card` | `jsonb` = `{}` | A "alma": voz, tabus, estética, lore, cadência. Spec em [docs/04](04-persona-card-spec.md) |
-| `persona_version` | `integer` = `1` | Versão corrente do card; espelha a última linha de `persona_versions` |
-| `persona_engine_id` | `text` | ID da persona na **máquina de influencers**. Sem ele não há geração de imagem consistente |
-| `device_binding` | `jsonb` = `{}` | Qual container/device redroid opera esta conta (referência ao android-manager) |
+| `persona_card` | `jsonb` = `{}` | **[HERANÇA — removida na 0008]** Use [`personas.persona_card`](#332-personas). Marcada por `COMMENT ON COLUMN` |
+| `persona_version` | `integer` = `1` | **[HERANÇA]** Espelha o card antigo. A versão vigente é `personas.persona_version` |
+| `persona_engine_id` | `text` | **[HERANÇA]** ID na **máquina de influencers**; a fonte é `personas.persona_engine_id` |
+| `device_binding` | `jsonb` = `{}` | **[HERANÇA — removida na 0008]** Use `account_placements`. Marcada por `COMMENT ON COLUMN` |
 | `cadence` | `jsonb` = `{"posts_per_day":1,"stories_per_day":3}` | Ritmo natural. **Teto** — campanha não pode ultrapassar |
 | `timezone` | `text` = `America/Sao_Paulo` | Fuso da persona, não do servidor |
 | `active_hours` | `int4range` = `[8,23)` | Janela "acordada" em horas locais. Fora dela o agente não age |
@@ -224,16 +253,18 @@ A unidade central do sistema: **1 linha = 1 conta de rede social = 1 agente**. T
 | `notes` | `text` | Anotação humana livre |
 | `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
 
-Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram e no TikTok como duas contas (dois agentes independentes, com memória separada).
+Restrição: `UNIQUE (platform, handle)` — o mesmo @ pode existir no Instagram e no TikTok como dois logins. Desde a 0007, os dois podem pertencer à **mesma persona**, e aí a memória é compartilhada.
 
-> A tabela acima é a da migração 0001. Os campos de **inventário** (`external_id`, `following`, `media_count`, `jid`, `last_synced_at`, `discovered_from`) vieram na 0006 e estão em [3.31](#331-campos-novos-em-accounts-e-account_placements).
+> A tabela acima é a da migração 0001. Os campos de **inventário** (`external_id`, `following`, `media_count`, `jid`, `last_synced_at`, `discovered_from`) vieram na 0006 e estão em [3.31](#331-campos-novos-em-accounts-e-account_placements); os de **identidade e operação** (`persona_id`, `role`, `profile`, `secret_ref`, `labels`, `metadata`, `last_seen_in_inventory`, `previous_handles`) vieram na 0007 e estão em [3.34](#334-campos-novos-em-accounts-migração-0007).
 
 **Quando usar / armadilhas.**
 - `active_hours` é `int4range` de **horas inteiras locais**, não `timestamptz`. `[8,23)` = das 08:00 às 22:59. Range que cruza a meia-noite (ex.: madrugada de conta noturna) **não** é representável em um único range — use `[0,3)` + política no código, ou reveja a persona. Isto é uma limitação conhecida do schema v1.
 - `cadence` aqui é o **teto operacional**; `persona_card.cadence` é a **intenção editorial**. Divergiram? O banco vence. O painel deve mostrar os dois.
 - `mood` é jsonb sem schema fixo de propósito: o formato ainda está sendo descoberto na Fase 1/3. Não crie índice nele antes de estabilizar.
-- **`device_binding` é herança e não é fonte da verdade.** Onde a conta vive passou a ser `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representa. Leia dos placements; o campo sobrevive apenas como anotação livre até uma migração de limpeza.
-- Deletar uma `account` cascateia memória, arcos, planos, conteúdo, posts, interações, tasks, aprovações e violações. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste.
+- **`device_binding` é herança e não é fonte da verdade.** Onde a conta vive passou a ser `account_placements` (+ `devices`, migrações 0002/0005): a mesma conta pode estar logada em vários containers, o que um jsonb escalar não representa. Leia dos placements; a 0007 marcou a coluna com `COMMENT ON COLUMN` e a 0008 a remove.
+- **`persona_card` também é herança**, pelo mesmo mecanismo e com o mesmo prazo. A janela em que as duas colunas convivem é o custo declarado da [ADR-0013](adr/0013-persona-separada-da-conta.md): uma consulta escrita por hábito lê o card velho e **não falha** — devolve dado desatualizado em silêncio. Ao tocar em qualquer código que leia persona, confira se ele já lê de `personas`.
+- Deletar uma `account` cascateia conteúdo, posts, interações, tasks, aprovações e violações — e **não** apaga memória, arcos nem planos, que desde a 0007 pertencem à persona. **Nunca delete conta perdida — use `status = 'lost'`.** O `DELETE` existe para limpeza de ambiente de teste, e a API exige `confirm=apagar-de-verdade`.
+- **Ausência de inventário não é ausência de conta.** Se todos os logins saírem dos devices, somem os `account_placements`; a conta, a persona, as observações e o histórico continuam. Ver [3.35](#335-situação--presença-dois-eixos-ortogonais).
 
 ---
 
@@ -253,7 +284,9 @@ Histórico imutável do Persona Card. Responde "por que ela mudou de voz na sema
 
 Restrição: `UNIQUE (account_id, version)`.
 
-**Quando usar / armadilhas.** Grave a versão **antes** de sobrescrever `accounts.persona_card`, na mesma transação. Snapshot completo é escolha consciente: diffs economizam bytes e custam a capacidade de reconstruir o prompt exato de um post antigo. Nunca faça `UPDATE` em uma linha aqui — é append-only.
+**Quando usar / armadilhas.** Grave a versão **antes** de sobrescrever o card, na mesma transação. Snapshot completo é escolha consciente: diffs economizam bytes e custam a capacidade de reconstruir o prompt exato de um post antigo. Nunca faça `UPDATE` em uma linha aqui — é append-only.
+
+> ⚠️ **A tabela continua ancorada em `account_id`, mas o card mudou de casa.** Desde a 0007 o card vive em `personas.persona_card` e é editado por `PATCH /v1/personas/{id}`, que incrementa `personas.persona_version` e grava **uma linha por conta vinculada** à persona. Uma persona com três logins gera três linhas por bump, com o mesmo `version` e o mesmo snapshot. Funciona e é auditável, mas é modelagem torta: o alvo natural é `persona_versions.persona_id`, e está registrado como dívida da 0008 ([ADR-0013](adr/0013-persona-separada-da-conta.md) § Consequências).
 
 ---
 
@@ -264,7 +297,8 @@ Arco narrativo em curso ("treinando para a maratona", "mudança de cidade"). É 
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `uuid` PK | |
-| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE`. **[HERANÇA desde a 0007]** — o arco é da personagem |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. Coluna da 0007; é por aqui que se lê |
 | `title` | `text` obrig. | Nome curto do arco |
 | `summary` | `text` obrig. | Sinopse injetada no prompt de PLAN |
 | `state` | `jsonb` = `{}` | Onde está no arco: fase, marcos batidos, próximos beats |
@@ -273,7 +307,9 @@ Arco narrativo em curso ("treinando para a maratona", "mudança de cidade"). É 
 | `active` | `boolean` = `true` | |
 | `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
 
-**Quando usar / armadilhas.** Nada impede vários arcos ativos por conta — e isso é intencional (um arco pessoal + um profissional). Mas **mais de 2–3 arcos ativos degradam o plano do dia**: o prompt fica com objetivos conflitantes e a LLM produz posts genéricos. Trate `count(*) WHERE active` > 3 como alerta operacional. Encerrar arco é `active = false` + `ends_at`, nunca `DELETE` (memórias apontam para ele).
+**Quando usar / armadilhas.** Nada impede vários arcos ativos por persona — e isso é intencional (um arco pessoal + um profissional). Mas **mais de 2–3 arcos ativos degradam o plano do dia**: o prompt fica com objetivos conflitantes e a LLM produz posts genéricos. Trate `count(*) WHERE active` > 3 como alerta operacional. Encerrar arco é `active = false` + `ends_at`, nunca `DELETE` (memórias apontam para ele).
+
+Desde a 0007, `account_id` e `persona_id` coexistem: a coluna antiga é herança, e o índice novo é `idx_arcs_persona` (parcial em `active`). Um arco escrito só com `account_id` some da leitura por persona — preencha `persona_id` sempre.
 
 ---
 
@@ -284,7 +320,8 @@ O *memory stream* do blueprint generative_agents. Tudo que o agente sabe sobre s
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `uuid` PK | |
-| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE`. **[HERANÇA desde a 0007]** |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. Coluna da 0007 — **a memória é da personagem, não do login** |
 | `kind` | `memory_kind` obrig. | `episodic` \| `semantic` \| `narrative` |
 | `content` | `text` obrig. | A memória em linguagem natural, primeira pessoa |
 | `embedding` | `vector(1024)` | Embedding de `content`. `NULL` = ainda não indexada |
@@ -300,7 +337,8 @@ O *memory stream* do blueprint generative_agents. Tudo que o agente sabe sobre s
 - `occurred_at` vs `created_at`: uma reflexão escrita à noite sobre a manhã tem `occurred_at` de manhã. A recência da recuperação usa `occurred_at`. Confundir os dois faz o agente achar que tudo aconteceu na hora da reflexão.
 - `importance` é atribuída **uma vez**, na escrita, pela LLM que criou a memória. Não recalcule em lote: isso reescreve a história do agente.
 - `last_used_at` não participa do ranking na v1 — é telemetria para decidir política de esquecimento (Fase 6). Escreva, não leia.
-- O índice HNSW cobre `embedding`, mas as consultas reais **sempre** filtram por `account_id` primeiro. Memória de uma conta nunca pode vazar para outra: esse `WHERE` é regra de segurança, não otimização.
+- O índice HNSW cobre `embedding`, mas as consultas reais **sempre** filtram por dono primeiro. Memória de uma personagem nunca pode vazar para outra: esse `WHERE` é regra de segurança, não otimização.
+- **Desde a 0007 o dono é `persona_id`**, não `account_id` — e a mudança é o ponto da [ADR-0013](adr/0013-persona-separada-da-conta.md): se a memória ficasse presa ao login, perder uma conta apagaria a história, e a mesma personagem no Instagram e no WhatsApp lembraria de coisas diferentes. Índice novo: `idx_memories_persona (persona_id, kind, occurred_at DESC)`. As consultas de referência da [seção 6](#6-consultas-de-referência) ainda estão escritas com `account_id` — leia `persona_id` onde o dono for a personagem.
 
 ---
 
@@ -311,7 +349,8 @@ Saída do passo **PLAN**: o que esta conta pretende fazer hoje e por quê. Uma l
 | Coluna | Tipo | Descrição |
 |---|---|---|
 | `id` | `uuid` PK | |
-| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE` |
+| `account_id` | `uuid` → `accounts` obrig. | `ON DELETE CASCADE`. **[HERANÇA desde a 0007]** |
+| `persona_id` | `uuid` → `personas` | `ON DELETE CASCADE`. Coluna da 0007 — o dia é da personagem, e vale para todos os logins dela |
 | `plan_date` | `date` obrig. | Data **no fuso da conta**, não em UTC |
 | `narrative` | `text` obrig. | "Hoje ela está na praia, humor alto, foco em leveza" |
 | `intents` | `jsonb` obrig. | Lista de intenções que viram `content_items` e `tasks` |
@@ -323,7 +362,9 @@ Restrição: `UNIQUE (account_id, plan_date)`.
 
 **Quando usar / armadilhas.** O `UNIQUE` é uma trava de idempotência: rodar o PLAN duas vezes no mesmo dia deve dar conflito, não duplicar o dia. Use `INSERT ... ON CONFLICT DO NOTHING` e trate o conflito como "já planejado". Replanejar (evento novo, campanha urgente) é `UPDATE` da linha existente + `event` registrando o replanejamento — **nunca** delete e recrie, ou os `content_items` perdem `day_plan_id`.
 
-`plan_date` derivado de `accounts.timezone`: uma conta em `America/Sao_Paulo` que planeja às 23:30 local está planejando o dia D, não D+1 (que é o que UTC diria).
+`plan_date` derivado de `accounts.timezone`: uma conta em `America/Sao_Paulo` que planeja às 23:30 local está planejando o dia D, não D+1 (que é o que UTC diria). O fuso continua sendo **do login**, porque é ele que age; o plano é **da persona**.
+
+> A restrição de unicidade continua sendo `(account_id, plan_date)` — não existe `UNIQUE (persona_id, plan_date)`. Uma persona com dois logins pode ter dois planos no mesmo dia, e isso é intencional enquanto o loop roda por conta. ❓ Se o PLAN passar a rodar por persona, esta unicidade precisa ser revista na mesma migração.
 
 ---
 
@@ -776,13 +817,15 @@ Ligações: `day_plans.llm_call_id` e `campaign_recon.llm_call_id` apontam para 
 
 ### 3.25 Triggers de `updated_at`
 
-A função `touch_updated_at()` é aplicada via `CREATE TRIGGER ... BEFORE UPDATE` a **sete** tabelas:
+A função `touch_updated_at()` é aplicada via `CREATE TRIGGER ... BEFORE UPDATE` a **sete** tabelas da migração 0001:
 
 `clients` · `accounts` · `story_arcs` · `monitors` · `content_items` · `campaigns` · `tasks`
 
 **Armadilha:** as demais tabelas **não têm** `updated_at` — são append-only por design (`events`, `llm_calls`, `memories`, `persona_versions`, `post_metrics`, `monitor_hits`, `guardrail_violations`) ou têm marco temporal próprio (`approvals.decided_at`, `interactions.replied_at`, `campaign_recon.analyzed_at`). Ao criar tabela nova, decida explicitamente em qual grupo ela entra e, se mutável, **adicione o trigger na mesma migração** — o bloco `DO $$` original não é reexecutado.
 
 As tabelas de infraestrutura da migração 0005 (`servers`, `server_services`, `devices`) **têm** o trigger, declarado na própria migração. `inventory_syncs` não tem: é append-only.
+
+Da migração 0007: `personas` **tem** o trigger (`trg_personas_touch`) — o card é editado e o `updated_at` importa. `entity_notes` **não tem**: é append-only, só `created_at`. Anotação não se edita; escreve-se outra.
 
 ---
 
@@ -962,7 +1005,7 @@ Restrição: `UNIQUE (platform, external_id) WHERE external_id IS NOT NULL`.
 - O índice é **parcial**: contas criadas à mão, sem `external_id`, não colidem entre si.
 - `accounts.followers` (que já existia) e os novos contadores são o **último valor coletado**, não série temporal. Para evolução, use `post_metrics` ou uma coleta dedicada.
 - `discovered_from` marca a origem, não a propriedade: uma conta descoberta no servidor A e migrada para o B continua apontando para A até alguém corrigir. É procedência, não localização — localização é `account_placements`.
-- Conta importada nasce em `draft`/`L0`, com o inventário real e sem persona escrita. Ela **existe e não age**.
+- Conta importada nasce em `registered`/`L0` (era `draft` antes da 0007), com o inventário real e **sem persona vinculada** — `persona_id IS NULL`. Ela **existe e não age** até alguém decidir de quem ela é e liberá-la.
 
 #### `account_placements` (novos)
 
@@ -982,6 +1025,150 @@ Restrição: `UNIQUE (platform, external_id) WHERE external_id IS NOT NULL`.
 - **`logged_in` ausente não é "deslogada".** No WhatsApp a conta **é** o usuário Android, e o serviço não reporta o campo. O código grava `logged_in = (valor is not False)` — ausência conta como logada.
 - **`device_id` é anulável e pode ficar `NULL`** quando o placement chega antes de o device ser visto pela primeira vez. O `UPSERT` preenche na varredura seguinte. Não trate `NULL` como "device inexistente".
 - A chave continua sendo `UNIQUE (account_id, node_id, container)`, não `device_id` — a linha nasce do inventário do nó, e o device é resolvido depois.
+
+---
+
+### 3.32 `personas`
+
+> Fonte: [`0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql). Decisão em [ADR-0013](adr/0013-persona-separada-da-conta.md).
+
+**A identidade.** Quem a personagem é, independente de onde ela está logada. Existe mesmo que nenhuma conta exista, e sobrevive à perda de todas elas.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `name` | `text` obrig. | Nome da personagem: `Luna Prado` |
+| `slug` | `text` obrig. **UNIQUE** | Identificador legível: `luna-prado`. É por ele que se fala dela fora do banco |
+| `description` | `text` | Resumo em uma linha, para a lista |
+| `persona_card` | `jsonb` = `{}` | **A "alma": voz, tabus, estética, lore, cadência. Fonte da verdade.** Spec em [docs/04](04-persona-card-spec.md) |
+| `persona_version` | `integer` = `1` | Versão corrente do card. Incrementada a cada edição |
+| `persona_engine_id` | `text` | ID na **máquina de influencers**. É a referência facial que impede a personagem de mudar de rosto entre posts |
+| `client_id` | `uuid` → `clients` | **[DORMENTE]** `ON DELETE SET NULL` |
+| `labels` | `text[]` = `{}` | Rótulos livres, com índice gin — servem para filtrar e agir em lote |
+| `notes` | `text` | Anotação humana livre. Histórico datado é [`entity_notes`](#333-entity_notes) |
+| `active` | `boolean` = `true` | Personagem aposentada é `false`, nunca `DELETE` |
+| `created_at` / `updated_at` | `timestamptz` | `updated_at` por trigger |
+
+Índices: `idx_personas_active on (name) WHERE active` · `idx_personas_labels` gin em `labels`.
+
+**Quando usar / armadilhas.**
+- **Uma persona, vários logins.** `accounts.persona_id` aponta para cá; o Instagram e o WhatsApp da mesma personagem são duas linhas de `accounts` e **uma** linha aqui. O `persona_card` vale para todos eles.
+- **`persona_card = '{}'` significa "card por escrever", não "não tem persona".** Quem não tem persona é a conta com `persona_id IS NULL`. Persona sem card não deve sair de `L0`: sem voz declarada, a LLM escreve genérico.
+- **`slug` é único globalmente.** A migração 0007 gera o slug a partir do handle da conta de origem por regex; duas contas homônimas em plataformas diferentes colidem e a segunda cai no `ON CONFLICT (slug) DO NOTHING`, ficando sem persona. É esperado e precisa de conferência manual.
+- **Apagar a persona não apaga os logins** (`accounts.persona_id` é `ON DELETE SET NULL`) — mas apaga memória, arcos e planos (`ON DELETE CASCADE`). Aposente com `active = false`.
+- `persona_engine_id` aqui é a fonte; a coluna homônima em `accounts` é herança.
+
+---
+
+### 3.33 `entity_notes`
+
+**Observações datadas** sobre qualquer entidade operacional: conta, persona, device ou servidor.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `id` | `uuid` PK | |
+| `subject_type` | `text` obrig. | `account` \| `persona` \| `device` \| `server` |
+| `subject_id` | `uuid` obrig. | ID na tabela correspondente (**sem FK**) |
+| `body` | `text` obrig. | A observação |
+| `author` | `text` | Quem anotou |
+| `pinned` | `boolean` = `false` | Fixada aparece sempre no topo da ficha |
+| `created_at` | `timestamptz` | |
+
+Índices: `idx_notes_subject (subject_type, subject_id, created_at DESC)` · `idx_notes_pinned (subject_type, subject_id) WHERE pinned`.
+
+**Quando usar / armadilhas.**
+- **É diferente de `accounts.notes`.** Aquele é um campo único: só sobrevive quem escreveu por último. Operação real precisa de histórico — *quem* anotou *o quê* e *quando*. Os dois coexistem: `notes` é a anotação corrente da ficha; `entity_notes` é o diário.
+- **`pinned` é para o que muda a decisão de quem chega depois:** "esta conta já caiu uma vez", "não usar para publi". Fixar tudo é não fixar nada.
+- **Polimórfica e sem integridade referencial**, pelo mesmo motivo de [`approvals`](#321-approvals): três tabelas quase idênticas custariam mais. O preço é anotação órfã quando o sujeito é apagado, e o painel precisa tolerar isso.
+- **Append-only na prática.** Não há `updated_at` e não há endpoint de edição — só criação e remoção (`DELETE /v1/notes/{id}`). Corrigir é anotar de novo.
+
+---
+
+### 3.34 Campos novos em `accounts` (migração 0007)
+
+A conta deixa de carregar a identidade e passa a carregar o que é **do login**: quem é o dono, qual é o papel, os dados operacionais e onde está a credencial.
+
+| Coluna | Tipo | Descrição |
+|---|---|---|
+| `persona_id` | `uuid` → `personas` | **Nulável de propósito** — conta coletora não representa personagem nenhuma. `ON DELETE SET NULL` |
+| `role` | `text` = `agent` | `agent` \| `collector` \| `utility`, com `CHECK (accounts_role_valido)`. Papel operacional, ≠ arquétipo |
+| `profile` | `jsonb` = `{}` | Dados operacionais do login: e-mail, telefone, nascimento, origem, proxy, geo. **Campos livres, sem schema fixo** |
+| `secret_ref` | `text` | **Referência a ONDE a credencial vive** — cofre, gerenciador, gaveta. ⚠️ A coluna **não é cifrada**: senha não entra aqui |
+| `labels` | `text[]` = `{}` | Rótulos livres, com índice gin. É o eixo de filtro que o operador inventa sozinho |
+| `metadata` | `jsonb` = `{}` | Qualquer coisa estruturada que não mereça coluna |
+| `last_seen_in_inventory` | `timestamptz` | Quando a varredura viu este login pela última vez. Entrada do cálculo de **presença** |
+| `previous_handles` | `text[]` = `{}` | Handles anteriores, empilhados a cada troca de `handle` |
+
+Índices novos:
+
+| Índice | Definição | Consulta que serve |
+|---|---|---|
+| `idx_accounts_persona` | `(persona_id)` | "Quais logins são desta personagem?" — a ficha de persona e o `LEFT JOIN` da listagem |
+| `idx_accounts_labels` | gin em `(labels)` | Filtro por rótulo em lista grande, com `:label = ANY(labels)` |
+| `idx_accounts_handle_trgm` | gin `(handle gin_trgm_ops)` | **Busca "contém"**, que é o que o operador digita. Com milhares de contas, `ILIKE '%luna%'` sem trigrama é seq scan a cada tecla |
+
+**Quando usar / armadilhas.**
+- **`persona_id IS NULL` é normal, não é dado faltando.** Todo código que toca conta precisa tolerá-lo: prompt sem card, ficha sem identidade, listagem que não pode virar `INNER JOIN`. A faceta `unbound` da API conta exatamente essas contas, para que a lacuna seja visível em vez de silenciosa.
+- **`role` ≠ `archetype`.** O arquétipo diz que tipo de conteúdo a conta produz (`influencer`, `gossip`, `clipper`, `messaging`, `collector`) e escolhe o `ContentSource` ([4.1](#41-archetype)); o papel diz o que ela faz na operação. A 0007 preencheu `role = 'utility'` para `archetype = 'messaging'` e `role = 'collector'` para `archetype = 'collector'`, mas os dois eixos podem divergir depois — uma conta de influencer pode ser rebaixada a `utility` sem perder o arquétipo (que é imutável).
+- **`secret_ref` guarda o endereço do segredo, nunca o segredo.** A coluna é texto puro num banco sem cifra em repouso; colar a senha aqui cria um alvo. O painel rotula o campo como *"onde está a credencial"* justamente para não convidar ao erro. A barreira é social enquanto não houver cofre na stack.
+- **`profile` é `jsonb` livre por decisão.** Cada operação tem seus campos, e congelá-los em colunas seria migração por mês. O painel sugere um conjunto (e-mail, telefone, nascimento, origem, proxy, geo, 2FA) e aceita chaves extras. Não indexe antes de o formato estabilizar.
+- **`previous_handles` existe para não confundir renomeação com sumiço.** O `PATCH` empilha o handle antigo quando ele muda. Sem isso, uma conta que trocou de @ parece ter desaparecido do inventário — e o identificador estável continua sendo `external_id` ([3.31](#331-campos-novos-em-accounts-e-account_placements)).
+- **`last_seen_in_inventory` é presença, não intenção.** Não confunda com `last_action_at` (última ação nossa) nem com `last_synced_at` (última varredura que tocou a linha).
+
+---
+
+### 3.35 Situação × presença: dois eixos ortogonais
+
+Duas perguntas diferentes sobre a mesma conta, e é **a divergência entre elas** que o operador precisa enxergar.
+
+| Eixo | Onde vive | Quem escreve | Pergunta |
+|---|---|---|---|
+| **Situação** (`status`) | `accounts.status`, ENUM `account_status` | humano e guardrails | *O que **nós** queremos que esta conta faça?* |
+| **Presença** | calculada no SQL a partir de `account_placements` + `accounts.last_seen_in_inventory` | a varredura de inventário | *O que a **realidade** diz sobre onde ela está?* |
+
+**Situação — o que nós queremos:**
+
+| Valor | Significado |
+|---|---|
+| `registered` | Cadastrada, ainda não liberada para agir. É onde toda conta nasce, inclusive as importadas do inventário |
+| `warming` | Em aquecimento: só consome conteúdo (assiste reels, vê stories), não publica |
+| `active` | Opera normalmente, dentro do nível de autonomia dela |
+| `paused` | Parada por decisão humana. Nada é despachado; nada se perde |
+| `suspended` | Contida por guardrail ou incidente. Exige revisão humana para voltar |
+| `lost` | Banida ou inacessível. **Fica no sistema de propósito** — o histórico é o que explica por que ela caiu |
+
+**Presença — o que a realidade diz:**
+
+| Valor | Significado | O que o operador faz |
+|---|---|---|
+| `online` | Logada num container visto na **última hora** | nada |
+| `stale` | Esteve num device, mas o inventário não a confirma há **mais de uma hora** | observar; pode ser só cache |
+| `missing` | Tem histórico de device, mas não aparece no inventário há **mais de um dia** | investigar: device caído, sessão expirada, ou conta caiu de verdade |
+| `unbound` | **Nunca** esteve num device, ou o vínculo foi removido | cadastro válido; só não tem onde rodar |
+
+O cálculo vive no router de contas (`PRESENCE_SQL`) e é aplicado tanto na listagem quanto nas facetas:
+
+```sql
+CASE
+  WHEN NOT EXISTS (SELECT 1 FROM account_placements p WHERE p.account_id = a.id)
+    THEN 'unbound'
+  WHEN EXISTS (SELECT 1 FROM account_placements p
+                WHERE p.account_id = a.id AND p.logged_in
+                  AND p.last_seen_at > now() - interval '1 hour')
+    THEN 'online'
+  WHEN a.last_seen_in_inventory > now() - interval '24 hours'
+    THEN 'stale'
+  ELSE 'missing'
+END
+```
+
+**Por que dois eixos e não um.** Uma conta pode estar `active` — queremos que opere — e há três dias fora do inventário: não dá. Nenhum status sozinho conta essa história, e colapsar os dois num campo só (um `status = 'offline'`, por exemplo) apagaria a informação mais útil, que é o **desencontro** entre intenção e realidade. Por isso os dois aparecem lado a lado na mesma linha da tabela do painel.
+
+> **"Se eu sair de todas as contas nos devices, eu perco a conta?" — NÃO.**
+> Some o `account_placements`. A conta, a persona, as observações, as tasks e todo o histórico continuam. A presença vira `unbound` ou `missing`, e é só isso que muda. **Nada é apagado por ausência de inventário.**
+> Apagar de verdade exige `DELETE /v1/accounts/{id}?confirm=apagar-de-verdade` e é desaconselhado: conta banida deve virar `status = 'lost'`.
+
+**Ordem da avaliação importa.** `unbound` é testado primeiro porque "nunca teve device" não é o mesmo que "sumiu": uma conta cadastrada à mão hoje não deve aparecer como `missing`. E `online` exige `logged_in` **e** `last_seen_at` recente — placement antigo de container morto não conta como presença.
 
 ---
 
@@ -1026,17 +1213,21 @@ Define qual implementação de `ContentSource` o passo SOURCE usa. É o único e
 
 ### 4.3 `account_status`
 
+É o eixo da **situação** — o que *nós* queremos. O eixo ortogonal, o da **presença**, está em [3.35](#335-situação--presença-dois-eixos-ortogonais) e não é ENUM: é calculado.
+
 | Valor | Significado |
 |---|---|
-| `draft` | Criada no painel, ainda sem device/login |
+| `registered` | Cadastrada, **ainda não liberada para agir**. Era `draft` até a 0007 |
 | `warming` | Em aquecimento: só consome conteúdo (assiste reels, segue, curte), não posta |
 | `active` | Operando normalmente |
 | `paused` | Pausada por humano |
 | `suspended` | Kill switch acionado (guardrail ou incidente) |
 | `lost` | Conta banida/perdida na plataforma |
 
+> **`draft` foi renomeado para `registered` na migração 0007** (`ALTER TYPE account_status RENAME VALUE`). "Draft" não dizia nada a quem opera — sugeria rascunho editável, e o estado real é *cadastrada, existe, e ainda não age*. É o estado em que nascem tanto a conta criada à mão quanto a importada do inventário. Renomear valor de ENUM é atômico no banco e **visível em todo lugar**: código, seed, teste e tela que comparassem com a string `'draft'` deixam de casar.
+
 ```
-   draft ──▶ warming ──▶ active ◄──────┐
+registered ─▶ warming ──▶ active ◄──────┐
                             │          │
                  ┌──────────┼──────────┤
                  ▼          ▼          │
@@ -1047,8 +1238,10 @@ Define qual implementação de `ContentSource` o passo SOURCE usa. É o único e
                     lost        ◄── terminal
 ```
 
-Permitidas: `draft→warming`, `warming→active`, `warming→lost`, `active→paused`, `active→suspended`, `active→lost`, `paused→active`, `paused→lost`, `suspended→active` (só por humano), `suspended→lost`, qualquer → `lost`.
-Proibidas: `draft→active` (sem aquecimento é o caminho mais curto para o ban), `lost→qualquer`.
+Permitidas: `registered→warming`, `warming→active`, `warming→lost`, `active→paused`, `active→suspended`, `active→lost`, `paused→active`, `paused→lost`, `suspended→active` (só por humano), `suspended→lost`, qualquer → `lost`.
+Proibidas: `registered→active` (sem aquecimento é o caminho mais curto para o ban), `lost→qualquer`.
+
+**`lost` é terminal e fica no sistema de propósito.** A conta banida não é apagada: o histórico — tasks, posts, violações, observações e a linha do tempo em `events` — é o que explica *por que* ela caiu, e é o único insumo para não repetir o erro na próxima. Apagar a linha destrói exatamente a informação pela qual ela ainda vale alguma coisa. Se a personagem continua, um login novo é vinculado à mesma `persona_id` e a memória segue intacta.
 
 ### 4.4 `task_type`
 
@@ -1309,7 +1502,7 @@ A separação `offline` × `unauthorized` não é cosmética: são consertos dif
 
 ## 5. Índices
 
-Vinte e sete índices. Muitos são **parciais** (`WHERE ...`): indexam só a fatia quente da tabela. O ganho é duplo — índice menor (cabe em cache) e escrita mais barata (linha que não bate no predicado não entra no índice). É a técnica certa para tabelas onde 99% das linhas estão em estado terminal e as consultas só olham o 1% ativo.
+Vinte e sete índices na migração 0001, mais os de infraestrutura (0005/0006) e os de identidade e busca em massa da 0007 ([5.5](#55-índices-da-identidade-e-da-busca-em-massa-migração-0007)). Muitos são **parciais** (`WHERE ...`): indexam só a fatia quente da tabela. O ganho é duplo — índice menor (cabe em cache) e escrita mais barata (linha que não bate no predicado não entra no índice). É a técnica certa para tabelas onde 99% das linhas estão em estado terminal e as consultas só olham o 1% ativo.
 
 ### 5.1 Índices parciais (o coração da operação)
 
@@ -1353,6 +1546,7 @@ Vinte e sete índices. Muitos são **parciais** (`WHERE ...`): indexam só a fat
 | Constraint | O que impede |
 |---|---|
 | `accounts (platform, handle)` | Duas linhas para a mesma conta real — dois agentes brigando pelo mesmo device |
+| `personas (slug)` | Duas identidades com o mesmo identificador legível. É por ele que se fala da personagem fora do banco |
 | `persona_versions (account_id, version)` | Duas versões com o mesmo número; garante linha do tempo íntegra |
 | `day_plans (account_id, plan_date)` | Planejar o mesmo dia duas vezes (idempotência do PLAN) |
 | `sources (kind, endpoint)` | Cadastrar a mesma fonte duas vezes e dobrar a coleta |
@@ -1368,6 +1562,29 @@ Registradas aqui para não serem redescobertas como bug:
 - **Sem índice em `guardrail_violations (account_id, created_at DESC)`** — a query "violações desta conta" usa `idx_violations_recent` e filtra. Revisar quando a frota crescer.
 - **Sem índice em `content_items (campaign_id)`** — "conteúdo desta campanha" é seq scan.
 - **`llm_calls` sem índice em `trace_id`** — correlacionar chamada de LLM com evento por trace hoje é scan. Candidato imediato quando a auditoria virar rotina.
+- **A presença não é indexável hoje** ([3.35](#335-situação--presença-dois-eixos-ortogonais)). Filtrar por `presence` avalia o `CASE` linha a linha, com subconsultas em `account_placements`. Aceitável na escala atual porque a listagem é paginada; se doer, a saída é materializar a presença numa coluna atualizada pela varredura — ao custo de ela deixar de ser sempre atual.
+
+---
+
+### 5.5 Índices da identidade e da busca em massa (migração 0007)
+
+Todos existem por causa da escala: a operação real tem **milhares** de logins, e a tela de contas é varrida, filtrada e ordenada o dia inteiro.
+
+| Índice | Definição | Consulta que serve |
+|---|---|---|
+| `idx_accounts_persona` | `(persona_id)` | "Quais logins são desta personagem?" — a ficha de persona e o `LEFT JOIN personas` da listagem |
+| `idx_accounts_labels` | gin em `(labels)` | Filtro por rótulo (`:label = ANY(labels)`). Rótulo é o eixo que o operador inventa sozinho, e é o que sustenta a ação em lote |
+| `idx_accounts_handle_trgm` | gin `(handle gin_trgm_ops)` | **Busca "contém"** — `handle ILIKE '%luna%'`. É o que o operador digita, e sem trigrama é seq scan a cada tecla |
+| `idx_personas_active` | `(name) WHERE active` | Lista de personas em ordem alfabética, sem as aposentadas |
+| `idx_personas_labels` | gin em `(labels)` | Idem `accounts`, do lado da identidade |
+| `idx_memories_persona` | `(persona_id, kind, occurred_at DESC)` | Recuperação de memória por recência dentro de um tipo, agora **por personagem** |
+| `idx_arcs_persona` | `(persona_id) WHERE active` | Contexto do PLAN: arcos vivos da personagem |
+| `idx_notes_subject` | `(subject_type, subject_id, created_at DESC)` | Observações de uma entidade, mais recentes primeiro |
+| `idx_notes_pinned` | `(subject_type, subject_id) WHERE pinned` | As fixadas, que a ficha mostra no topo antes de tudo |
+
+**Por que trigrama e não `LIKE 'prefixo%'`.** Índice B-tree serve busca por prefixo; o operador não digita prefixo, digita pedaço — lembra "luna" de `@lunaprado.oficial`. `pg_trgm` é a extensão já habilitada para dedup e QA de caption, então o custo marginal é um índice, não uma dependência nova.
+
+**As facetas não têm índice próprio, e é de propósito.** As contagens por plataforma, situação, papel, arquétipo e presença varrem `accounts` inteira — mas em **uma única consulta** com todas as agregações, em vez de seis idas ao banco. Índice de contagem só ajudaria com `count` por coluna isolada; o gargalo, se aparecer, é a passada única e se resolve com cache curto.
 
 ---
 
@@ -1832,10 +2049,12 @@ Casos específicos deste schema:
 
 - [`db/migrations/0001_initial.sql`](../db/migrations/0001_initial.sql) — a fonte da verdade do núcleo
 - [`db/migrations/0005_servers_and_services.sql`](../db/migrations/0005_servers_and_services.sql) · [`0006_account_inventory.sql`](../db/migrations/0006_account_inventory.sql) — infraestrutura e inventário ([3.26](#326-infraestrutura-um-servidor-vários-serviços))
+- [`db/migrations/0007_personas_e_contas.sql`](../db/migrations/0007_personas_e_contas.sql) — personas, papéis, observações e presença ([3.32](#332-personas) a [3.35](#335-situação--presença-dois-eixos-ortogonais))
 - [ADR-0001](adr/0001-core-proprio.md) — por que core próprio; por que o modelo de dados é nosso
 - [ADR-0012](adr/0012-servidor-com-varios-servicos.md) — por que servidor e serviço são tabelas diferentes
+- [ADR-0013](adr/0013-persona-separada-da-conta.md) — por que a identidade, o login e o lugar onde ele roda são três coisas
 - [docs/contratos/android-manager.md](contratos/android-manager.md) — o serviço que alimenta `devices`
-- [docs/04 — Persona Card](04-persona-card-spec.md) — o schema de `accounts.persona_card`
+- [docs/04 — Persona Card](04-persona-card-spec.md) — o schema de `personas.persona_card`
 - [docs/05 — Loop do agente](05-loop-do-agente.md) — quem escreve em qual tabela, em qual passo
 - [docs/06 — Campanhas](06-campanhas.md) — `spread_policy`, recon e espalhamento
 - [docs/08 — Guardrails e autonomia](08-guardrails-e-autonomia.md) — catálogo de `rule` e política por nível
