@@ -12,6 +12,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
 from olimpo.core.config import settings
+from olimpo.api.routers import accounts, nodes
 from olimpo.core.db import healthcheck
 
 log = structlog.get_logger(__name__)
@@ -73,8 +74,11 @@ async def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+app.include_router(nodes.router)
+app.include_router(accounts.router)
+
 # Routers das próximas fases — ver docs/fases/
-# from olimpo.api.routers import accounts, campaigns, approvals, tasks, events
-# app.include_router(accounts.router, prefix="/api/v1")
-# from olimpo.api import webhooks
-# app.include_router(webhooks.router)
+# campaigns, approvals, tasks, events (SSE)
+#
+# Não haverá router de webhook: o android-orchestrator não tem callback.
+# O caminho é polling — ver ADR-0011.

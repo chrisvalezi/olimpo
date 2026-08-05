@@ -35,10 +35,11 @@ class Settings(BaseSettings):
     llm_daily_budget_usd: float = 5.0
 
     # --- serviços externos ------------------------------------------------
+    # Semente do primeiro nó numa instalação nova. A lista real de servidores
+    # vive em `orchestrator_nodes` — o serviço não tem índice de frota, e não
+    # tem webhook: a confirmação é por polling. Ver ADR-0011.
     orchestrator_url: str = ""
     orchestrator_token: str = ""
-    orchestrator_webhook_url: str = ""
-    orchestrator_webhook_secret: str = ""
 
     persona_engine_url: str = ""
     persona_engine_token: str = ""

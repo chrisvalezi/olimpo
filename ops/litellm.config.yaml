@@ -42,40 +42,76 @@ model_list:
   # interação em tempo real pela mesma memória e vira swap de pesos.
   # ===========================================================================
 
-  - model_name: olimpo-fast
-    litellm_params:
-      model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
-      api_base: os.environ/MAC_MINI_1_URL
-      weight: 4                # preferência estrutural pelo Mac 1
-      rpm: 600
-      timeout: 30              # falha rápido → cai para o fallback
-      stream_timeout: 15
-      # Local não tem custo marginal. Zero explícito para não poluir o
-      # controle de budget, que só deve contar API externa.
-      input_cost_per_token: 0.0
-      output_cost_per_token: 0.0
-    model_info:
-      id: mac1-fast
-      mode: chat
-      base_model: qwen2.5-7b
-      supports_function_calling: true
-      metadata: "Mac mini 1 · OLLAMA_KEEP_ALIVE=-1 · NUM_PARALLEL=4"
+  # ⏸️ DESATIVADO: os Mac minis ainda não estão na rede. Enquanto
+  #    MAC_MINI_*_URL apontam para o placeholder (= ollama local), o
+  #    balanceador escolhia este deployment e pedia um modelo que não
+  #    existe lá — devolvendo texto corrompido. Reative quando os Macs
+  #    estiverem acessíveis e com o modelo baixado.
+  # - model_name: olimpo-fast
+  #   litellm_params:
+  #     model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
+  #     api_base: os.environ/MAC_MINI_1_URL
+  #     weight: 4                # preferência estrutural pelo Mac 1
+  #     rpm: 600
+  #     timeout: 30              # falha rápido → cai para o fallback
+  #     stream_timeout: 15
+  #     # Local não tem custo marginal. Zero explícito para não poluir o
+  #     # controle de budget, que só deve contar API externa.
+  #     input_cost_per_token: 0.0
+  #     output_cost_per_token: 0.0
+  #   model_info:
+  #     id: mac1-fast
+  #     mode: chat
+  #     base_model: qwen2.5-7b
+  #     supports_function_calling: true
+  #     metadata: "Mac mini 1 · OLLAMA_KEEP_ALIVE=-1 · NUM_PARALLEL=4"
 
+  # ⏸️ DESATIVADO: os Mac minis ainda não estão na rede. Enquanto
+  #    MAC_MINI_*_URL apontam para o placeholder (= ollama local), o
+  #    balanceador escolhia este deployment e pedia um modelo que não
+  #    existe lá — devolvendo texto corrompido. Reative quando os Macs
+  #    estiverem acessíveis e com o modelo baixado.
+  # - model_name: olimpo-fast
+  #   litellm_params:
+  #     model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
+  #     api_base: os.environ/MAC_MINI_2_URL
+  #     weight: 1                # só transbordo
+  #     rpm: 60                  # teto baixo: o Mac 2 não pode ser inundado
+  #     timeout: 30
+  #     stream_timeout: 15
+  #     input_cost_per_token: 0.0
+  #     output_cost_per_token: 0.0
+  #   model_info:
+  #     id: mac2-fast-overflow
+  #     mode: chat
+  #     base_model: qwen2.5-7b
+  #     metadata: "Mac mini 2 · transbordo apenas"
+
+  # ---------------------------------------------------------------------------
+  # GPU local do host (RTX 4090 24 GB) — o deployment mais rápido do pool.
+  # Peso alto porque uma 4090 com um 8B responde bem abaixo do que qualquer
+  # Mac mini entrega; os Macs viram transbordo quando ela satura.
+  # Requer OLLAMA_HOST=0.0.0.0 no host — ver docs/09-llm-gateway.md §9.
+  # ---------------------------------------------------------------------------
   - model_name: olimpo-fast
     litellm_params:
-      model: ollama_chat/qwen2.5:7b-instruct-q4_K_M
-      api_base: os.environ/MAC_MINI_2_URL
-      weight: 1                # só transbordo
-      rpm: 60                  # teto baixo: o Mac 2 não pode ser inundado
-      timeout: 30
-      stream_timeout: 15
+      model: ollama_chat/qwen3:8b
+      api_base: os.environ/LOCAL_GPU_URL
+      # qwen3 é modelo de raciocínio: sem isto ele gasta a cota inteira de
+      # tokens dentro de <think> e devolve a caption vazia.
+      think: false
+      weight: 8
+      rpm: 900
+      timeout: 60
+      stream_timeout: 30
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
     model_info:
-      id: mac2-fast-overflow
+      id: local-4090-fast
       mode: chat
-      base_model: qwen2.5-7b
-      metadata: "Mac mini 2 · transbordo apenas"
+      base_model: qwen3-8b
+      supports_function_calling: true
+      metadata: "host i9-14900k · RTX 4090 24GB · sem thinking tokens"
 
   # ===========================================================================
   # olimpo-reason — raciocínio, contexto longo
@@ -86,21 +122,45 @@ model_list:
   # demora. Falhar em 30 s aqui só produz retry caro.
   # ===========================================================================
 
+  # ⏸️ DESATIVADO: os Mac minis ainda não estão na rede. Enquanto
+  #    MAC_MINI_*_URL apontam para o placeholder (= ollama local), o
+  #    balanceador escolhia este deployment e pedia um modelo que não
+  #    existe lá — devolvendo texto corrompido. Reative quando os Macs
+  #    estiverem acessíveis e com o modelo baixado.
+  # - model_name: olimpo-reason
+  #   litellm_params:
+  #     model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
+  #     api_base: os.environ/MAC_MINI_2_URL
+  #     rpm: 60
+  #     timeout: 180
+  #     stream_timeout: 60
+  #     input_cost_per_token: 0.0
+  #     output_cost_per_token: 0.0
+  #   model_info:
+  #     id: mac2-reason
+  #     mode: chat
+  #     base_model: qwen2.5-14b
+  #     supports_function_calling: true
+  #     metadata: "Mac mini 2 · KEEP_ALIVE=30m · NUM_PARALLEL=1"
+
+  # GPU local — 32B cabe na 4090 quantizado e é o melhor raciocínio local
+  # disponível hoje. Preferido sobre o Mac 2 pelo peso.
   - model_name: olimpo-reason
     litellm_params:
-      model: ollama_chat/qwen2.5:14b-instruct-q4_K_M
-      api_base: os.environ/MAC_MINI_2_URL
-      rpm: 60
+      model: ollama_chat/qwen3-abliterated:32b-gpu16k
+      api_base: os.environ/LOCAL_GPU_URL
+      weight: 4
+      rpm: 120
       timeout: 180
       stream_timeout: 60
       input_cost_per_token: 0.0
       output_cost_per_token: 0.0
     model_info:
-      id: mac2-reason
+      id: local-4090-reason
       mode: chat
-      base_model: qwen2.5-14b
+      base_model: qwen3-32b
       supports_function_calling: true
-      metadata: "Mac mini 2 · KEEP_ALIVE=30m · NUM_PARALLEL=1"
+      metadata: "host i9-14900k · RTX 4090 · contexto 16k"
 
   # ===========================================================================
   # olimpo-vision — recon multimodal
@@ -113,19 +173,24 @@ model_list:
   # local como fallback. Ver docs/09 §5.1.
   # ===========================================================================
 
-  - model_name: olimpo-vision
-    litellm_params:
-      model: ollama_chat/qwen2.5vl:7b-q4_K_M
-      api_base: os.environ/MAC_MINI_2_URL
-      rpm: 30
-      timeout: 120
-      input_cost_per_token: 0.0
-      output_cost_per_token: 0.0
-    model_info:
-      id: mac2-vision
-      mode: chat
-      base_model: qwen2.5-vl-7b
-      supports_vision: true
+  # ⏸️ DESATIVADO: os Mac minis ainda não estão na rede. Enquanto
+  #    MAC_MINI_*_URL apontam para o placeholder (= ollama local), o
+  #    balanceador escolhia este deployment e pedia um modelo que não
+  #    existe lá — devolvendo texto corrompido. Reative quando os Macs
+  #    estiverem acessíveis e com o modelo baixado.
+  # - model_name: olimpo-vision
+  #   litellm_params:
+  #     model: ollama_chat/qwen2.5vl:7b-q4_K_M
+  #     api_base: os.environ/MAC_MINI_2_URL
+  #     rpm: 30
+  #     timeout: 120
+  #     input_cost_per_token: 0.0
+  #     output_cost_per_token: 0.0
+  #   model_info:
+  #     id: mac2-vision
+  #     mode: chat
+  #     base_model: qwen2.5-vl-7b
+  #     supports_vision: true
 
   # ===========================================================================
   # olimpo-smart — qualidade via API externa
