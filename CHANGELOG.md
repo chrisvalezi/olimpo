@@ -26,7 +26,13 @@ Todas as mudanças relevantes do Olimpo. Formato baseado em [Keep a Changelog](h
 
 **Aba Mídias** — todo o acervo da persona, não só `role=generated` como antes. Filtros por identidade / figurinos / produzido / referências com contagem, visor com modelo, dimensões e o prompt exato, e navegação por setas.
 
+**Estúdio virou aba da persona** — era página própria com seletor de personas no topo, o que invertia a relação: a persona é o sujeito, a foto é o que se faz com ela. `/estudio` continua respondendo, como redirecionamento.
+
 ### Corrigido
+
+**Teto de referências era global e estava errado** — eu tinha fixado 10 para todo mundo, mas o FLUX.2 aceita **4** e é o padrão. Uma persona com quatro âncoras mais fotos de acervo estourava com `422` no worker, longe da tela. Agora o teto é por modelo (conferido contra a API) e o corte é por prioridade: rosto nunca sai, roupa e produto são o pedido, closes e ângulos extras são o que se sacrifica.
+
+**Dois arrays de referência em paralelo** — o motor de prompt monta o array na ordem em que atribui `@imageN`, e o serviço montava outro por conta própria. As duas ordens coincidiam por acaso; a primeira divergência faria `@image2` apontar para a imagem errada, e o sintoma seria a roupa saindo da referência de rosto. O array agora vem do motor, que é quem sabe que texto livre de roupa desliga a imagem de roupa. No caminho, `por_papel` colapsava várias fotos de acervo numa só, porque era dicionário.
 
 **Papel de âncora ficava mentindo** — definir uma âncora nova não rebaixava a anterior, então dois assets diziam ser a folha de personagem e só um era apontado pela persona. Corrigido em `definir_ancora()` e as órfãs existentes foram normalizadas.
 

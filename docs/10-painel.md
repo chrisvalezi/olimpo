@@ -290,7 +290,9 @@ As abas não são só arrumação de tela: **o conteúdo da aba inativa não é 
 |---|---|---|
 | Identidade visual | topo, fixo | é o que se olha antes de tudo, e o que precisa estar à mão enquanto se mexe no resto |
 | Fotos de referência | logo abaixo, fixo | sem rosto elas não salvam nada; com rosto melhoram toda geração |
-| Mídias · Figurinos · Ficha · Logins | abas | campos demais para empilhar |
+| Estúdio · Mídias · Figurinos · Ficha · Logins | abas | campos demais para empilhar |
+
+**O estúdio virou aba.** Era uma página própria (`/estudio`) com um seletor de personas no topo, e isso invertia a relação: a persona é o sujeito, a foto é o que se faz com ela. Escolher a personagem numa tela separada obrigava a sair da ficha, perder o contexto das âncoras e dos figurinos, e voltar. A rota antiga continua existindo como **redirecionamento** — `/estudio?persona=<id>` era o que a tela gerava a cada troca, então está no histórico de quem usou, e um 404 não ensina para onde foi.
 
 O card em dois modos, alternáveis por um botão, editando o **mesmo** objeto.
 

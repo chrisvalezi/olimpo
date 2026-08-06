@@ -9,6 +9,7 @@ import { tempoRelativo } from "@/lib/contas";
 import { IdentidadeVisual, Figurinos } from "@/components/identidade-visual";
 import { FotosDeReferencia } from "@/components/fotos-referencia";
 import { MidiasDaPersona } from "@/components/midias-da-persona";
+import { EstudioDaPersona } from "@/components/estudio-da-persona";
 import { PersonaFicha } from "@/components/persona-ficha";
 import { PersonaLogins } from "@/components/persona-logins";
 import { Abas } from "@/components/abas";
@@ -22,7 +23,11 @@ import { Abas } from "@/components/abas";
  * dezenas de campos de persona card, com a galeria de mídias no rodapé,
  * depois de tudo.
  *
- * O resto — ficha, figurinos, mídias, logins — vai para abas. Uma persona
+ * O resto — estúdio, mídias, figurinos, ficha, logins — vai para abas. O
+ * estúdio morava numa página própria com um seletor de personas no topo, e
+ * isso invertia a relação: a persona é o sujeito, a foto é o que se faz com
+ * ela. Escolher a personagem numa tela separada obrigava a sair da ficha,
+ * perder o contexto das âncoras e dos figurinos, e voltar. Uma persona
  * tem campos demais para empilhar: montar tudo de uma vez empurra as imagens
  * para fora da tela e dispara todas as requisições juntas.
  */
@@ -111,6 +116,10 @@ export default function FichaDaPersona({ params }: { params: Promise<{ id: strin
       {/* ──────────────────────────────────────────────────────── o resto */}
       <Abas
         abas={[
+          {
+            chave: "estudio", rotulo: "Estúdio",
+            conteudo: () => <EstudioDaPersona personaId={id} />,
+          },
           {
             chave: "midias", rotulo: "Mídias",
             conteudo: () => <MidiasDaPersona personaId={id} />,

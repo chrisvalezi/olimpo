@@ -405,11 +405,33 @@ Nem toda geração envia as mesmas imagens, e a diferença é intencional:
 | Propor rosto | só as fotos passadas no modal, com papel declarado (`face`/`style`/`extra`) |
 | Âncoras derivadas | rosto + **acervo de referência** da persona |
 | Figurino | rosto + folha de personagem (layout) + fotos de peças |
-| Estúdio de fotos | rosto + roupa + os dois closes + produto + acervo |
+| Estúdio de fotos | rosto + roupa + os dois closes + produto + acervo, cortado ao teto do modelo |
 
 O rosto **não** recebe o acervo: ele é o que ainda não existe quando se propõe um rosto, e as fotos do acervo são justamente as que o operador escolhe no modal.
 
-Teto de **10 imagens** por geração ([`MAXIMO_REFERENCIAS`](../src/olimpo/media/identidade.py)). Não é economia: `limpar_prompt` só traduz `@imageN` até a décima posição, a instrução posicional só sabe nomear até `tenth`, e o peso de cada referência cai conforme o número sobe — vinte fotos diluem o rosto em vez de reforçá-lo. Quando corta, registra em log e grava `referencias_cortadas` no asset.
+#### O teto é do modelo, e não é uniforme
+
+Passar do limite é `422` no provider — e isso só aparece **no worker**, depois do job enfileirado, com uma mensagem sobre `image_urls` que não diz nada a quem pediu uma foto. Valores conferidos contra a API, não presumidos:
+
+| Modelo | Teto | Como se sabe |
+|---|---|---|
+| `fal-flux` | **4** | recusa explícita: *"Number of image URLs must be less than or equal to 4"* |
+| `fal-nano` | 10 | recusa explícita: *"At most 10 image URLs are allowed"* |
+| `fal-nano-pro`, `fal-seedream`, `fal-seedream-lite` | 10 | aceitaram 11 sem reclamar; **10 é escolha nossa** — o peso por referência cai conforme o número sobe, e vinte fotos diluem o rosto em vez de reforçá-lo |
+| `openai-gpt-image-2`, `fal-gpt-image-2` | 16 | `maxItems` declarado no schema do fal |
+
+> ⚠️ **O FLUX.2 é o padrão e é o mais apertado.** Uma persona completa (4 âncoras) já ocupa o teto inteiro; com produto ou fotos de acervo, alguma coisa sempre fica de fora.
+
+`servico.limitar_referencias()` corta por prioridade, e a ordem de sacrifício não é arbitrária:
+
+```
+face ─ wardrobe/layout ─ product/garment ─ close_up_face ─ close_up_detail ─ extra
+ └ nunca sai            └ SÃO o pedido                     └ melhoram, mas a foto continua certa sem eles
+```
+
+Largar o produto que o operador escolheu produz exatamente a foto que ele não pediu — e ninguém vê erro nenhum. **A ordem original é preservada entre os sobreviventes**, porque ela é o contrato posicional do prompt.
+
+> **Consequência observada.** Com o FLUX e um figurino escolhido, os dois closes sobrevivem ao corte e carregam a roupa **anterior** — a instrução deles é *"match skin texture and facial detail"*, que não exclui vestuário. Na prática o modelo seguiu a maioria e devolveu a roupa antiga. Com um modelo de 10 vagas o mesmo pedido saiu com o figurino correto. Duas saídas possíveis, nenhuma tomada ainda: mudar o modelo padrão, ou acrescentar exclusão de vestuário à linha dos closes — o que **alteraria texto portado e verificado** contra a origem ([docs/14](14-motores-de-prompt.md)).
 
 ### 8.2 O catálogo de motores
 
