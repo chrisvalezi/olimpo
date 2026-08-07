@@ -172,23 +172,25 @@ model_list:
   # Ver docs/13-geracao-de-midia.md §2.
   # ===========================================================================
 
-  - model_name: olimpo-image
-    litellm_params:
-      model: fal_ai/fal-ai/bytedance/seedream/v3/text-to-image
-      api_key: os.environ/FAL_API_KEY
-      timeout: 300
-    model_info:
-      id: fal-seedream-t2i
-      mode: image_generation
-
-  - model_name: olimpo-image
-    litellm_params:
-      model: fal_ai/fal-ai/flux-pro/v1.1
-      api_key: os.environ/FAL_API_KEY
-      timeout: 300
-    model_info:
-      id: fal-flux-pro-t2i
-      mode: image_generation
+  # ⛔ REMOVIDOS EM 2026-08-07 — QUEIMARAM SALDO SEM NINGUÉM CHAMAR.
+  #
+  # `background_health_checks: true` + `health_check_interval: 60` (abaixo em
+  # general_settings) faz o LiteLLM sondar CADA deployment a cada 60 s. Para
+  # deployment com `mode: image_generation`, a sonda **gera uma imagem de
+  # verdade** — e ela é cobrada como qualquer outra.
+  #
+  # Duas por minuto, 24 h por dia, sem um único pedido do Olimpo:
+  #   flux-pro/v1.1              US$ 21
+  #   seedream/v3 text-to-image  US$ 15
+  #
+  # O comentário que eu tinha escrito no health check ("um Mac mini que
+  # voltou reentra na rotação sozinho") vale para modelo de texto local, que
+  # custa zero. Aplicá-lo a um modelo de imagem pago foi erro meu.
+  #
+  # Não voltam. O caminho de texto→imagem sem referência é atendido pelo
+  # cliente fal direto (`media/providers/fal.py`, campo `t2i` do registro),
+  # que é o mesmo endpoint sem intermediário — e só dispara quando alguém
+  # pede. Ver docs/13-geracao-de-midia.md §2.
 
   # ===========================================================================
   # olimpo-vision — recon multimodal
@@ -452,6 +454,14 @@ general_settings:
 
   # Sonda ativa: um Mac mini que voltou reentra na rotação sozinho, sem
   # esperar tráfego real falhar primeiro.
+  #
+  # ⚠️ SÓ SEGURO ENQUANTO TODO DEPLOYMENT AQUI FOR DE TEXTO. A sonda faz uma
+  # chamada REAL a cada 60 s por deployment: para modelo local isso custa
+  # eletricidade, para modelo pago custa dinheiro, e para `image_generation`
+  # custa uma imagem inteira por minuto. Já queimou US$ 36 assim.
+  #
+  # ANTES DE ADICIONAR QUALQUER MODELO PAGO AQUI: ou deixe-o fora do
+  # gateway, ou desligue esta sonda.
   background_health_checks: true
   health_check_interval: 60
 

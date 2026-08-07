@@ -74,12 +74,34 @@ class TestOrdemDasReferencias:
 
 
 class TestEscolhaDeProvider:
-    """O gateway só expõe texto→imagem. Assim que existe referência — que é
-    o caso normal de uma persona já criada — o caminho é o direto."""
+    """Nenhuma imagem passa pelo gateway. Todas vão pelo cliente direto."""
 
-    def test_gateway_atende_texto_puro(self):
+    def test_gateway_nao_atende_imagem_nenhuma(self):
+        """Desligado em 2026-08-07, e o teste existe para que religar seja
+        uma decisão e não um descuido.
+
+        O alias `olimpo-image` saiu do LiteLLM porque a sonda de saúde
+        (`background_health_checks`, a cada 60 s) **gera uma imagem real** em
+        deployment com `mode: image_generation`. Queimou US$ 36 em cerca de
+        nove horas, sem um único pedido do Olimpo — duas imagens por minuto,
+        dia e noite.
+
+        Quem for religar precisa antes garantir que a sonda não alcança o
+        deployment. Trocar este teste sem isso repete a conta.
+        """
         req = GenerationRequest(kind=MediaKind.IMAGE, prompt="uma foto")
-        assert GatewayImageProvider().supports(req)
+        assert not GatewayImageProvider().supports(req)
+
+    def test_texto_puro_vai_para_o_cliente_direto(self):
+        """O caminho não sumiu, mudou de dono.
+
+        O fal tem endpoint de texto puro (`t2i` no registro) — mesmo modelo,
+        sem intermediário, e só dispara quando alguém pede.
+        """
+        from olimpo.media import modelos
+
+        assert modelos.resolver_imagem("fal-flux").t2i
+        assert modelos.resolver_imagem("fal-seedream").t2i
 
     def test_gateway_recusa_com_referencia(self):
         req = GenerationRequest(

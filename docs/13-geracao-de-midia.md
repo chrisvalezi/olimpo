@@ -61,10 +61,20 @@ O **Higgsfield** foi removido inteiro: ~2.000 linhas de cliente, cinco colunas d
 
 O princípio geral do projeto é que **todo tráfego de modelo passa pelo LiteLLM** ([ADR-0010](adr/0010-llm-gateway-litellm.md)). Aqui ele não se sustenta inteiro, e a exceção foi verificada contra a instalação real do gateway — não presumida.
 
+> ⛔ **Imagem não passa mais pelo gateway. Nenhuma.**
+>
+> O LiteLLM tem `background_health_checks: true` com `health_check_interval: 60`, e a sonda faz uma chamada **real** a cada 60 s em cada deployment. Para deployment com `mode: image_generation`, essa chamada **gera uma imagem** — e ela é cobrada.
+>
+> Dois modelos de imagem estavam registrados ali. Resultado: **US$ 36 queimados** (flux-pro/v1.1 US$ 21 · seedream/v3 US$ 15) em cerca de nove horas, com **três** chamadas legítimas do Olimpo no período. Os dois valores implicam ~500 chamadas cada — números quase idênticos em modelos diferentes, que é a assinatura de uma sonda periódica e nunca de uso humano.
+>
+> O texto→imagem sem referência agora vai pelo cliente fal direto, pelo campo `t2i` do registro: mesmo endpoint, sem intermediário, e só dispara quando alguém pede.
+>
+> **Antes de pôr qualquer modelo pago no gateway:** ou deixe-o fora dele, ou desligue a sonda. `GatewayImageProvider.supports()` devolve `False` fixo, e `tests/unit/test_geracao.py` guarda essa decisão para que religar seja escolha e não descuido.
+
 | Caminho | Rota | Situação |
 |---|---|---|
 | texto → texto | gateway | ✅ já em uso (plano do dia, caption, QA) |
-| texto → imagem | gateway | ✅ 14 modelos fal registrados, incluindo o seedream |
+| texto → imagem | ~~gateway~~ **direto** | ⛔ retirado do gateway em 2026-08-07 — ver o aviso abaixo |
 | imagem OpenAI (`gpt-image-*`) | direto | ⚠️ o gateway não expõe `/images/edits`, e a resposta em base64 não cabe no formato dele |
 | **imagem + referência → imagem** | **direto** | ⚠️ o gateway não expõe endpoint de edição |
 | texto/imagem → vídeo | direto | ⚠️ nenhum modelo de vídeo registrado no gateway |
