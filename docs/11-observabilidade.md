@@ -81,6 +81,10 @@ O `detail jsonb` carrega o **motivo legível por humano**, não só ids. Um `loo
 
 ---
 
+> ⚠️ **O que esta página observa são as NOSSAS tabelas.** Gasto que acontece fora delas é invisível por construção — foi assim que uma sonda de saúde do gateway queimou US$ 36 em 43 horas sem produzir um único job, asset ou registro em `llm_calls`. Ver [INC-0001](incidentes/0001-sonda-de-saude-gerando-imagem.md).
+>
+> Teto de gasto e alerta **no provider** são a única defesa que não depende de o custo passar por código nosso.
+
 ## 2. Logs estruturados (structlog)
 
 ### 2.1 Campos obrigatórios em **todo** log

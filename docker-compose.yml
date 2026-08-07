@@ -28,6 +28,11 @@ x-python-common: &python-common
     # container, onde as dependências existem.
     - ./tests:/app/tests
     - ./pyproject.toml:/app/pyproject.toml:ro
+    # Só leitura, e só para o teste conseguir INSPECIONAR o config do
+    # gateway. Sem este mount o guarda de custo pula em silêncio — e um
+    # teste que pula é pior que teste nenhum, porque parece verde.
+    # Ver docs/incidentes/0001-sonda-de-saude-gerando-imagem.md
+    - ./ops:/app/ops:ro
     - media:/app/media
     - ./dryrun:/app/dryrun
     # Mídia preservada da máquina de influencers, só de leitura. Sai daqui

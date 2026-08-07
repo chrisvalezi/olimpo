@@ -69,6 +69,8 @@ O princípio geral do projeto é que **todo tráfego de modelo passa pelo LiteLL
 >
 > O texto→imagem sem referência agora vai pelo cliente fal direto, pelo campo `t2i` do registro: mesmo endpoint, sem intermediário, e só dispara quando alguém pede.
 >
+> Relato completo, com timeline e o erro de raciocínio nomeado: [INC-0001](incidentes/0001-sonda-de-saude-gerando-imagem.md).
+>
 > **Antes de pôr qualquer modelo pago no gateway:** ou deixe-o fora dele, ou desligue a sonda. `GatewayImageProvider.supports()` devolve `False` fixo, e `tests/unit/test_geracao.py` guarda essa decisão para que religar seja escolha e não descuido.
 
 | Caminho | Rota | Situação |

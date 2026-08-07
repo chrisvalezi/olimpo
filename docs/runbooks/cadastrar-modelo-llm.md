@@ -106,15 +106,37 @@ curl -s -X POST http://localhost:4100/v1/chat/completions \
 
 ---
 
-## As três armadilhas que já nos pegaram
+## ⛔ Antes de tudo: o modelo é cobrado por chamada?
 
-### 1. Modelos que "pensam" devolvem resposta vazia
+Se sim, **ele provavelmente não deve entrar aqui.**
+
+O gateway roda `background_health_checks: true` com intervalo de 60 s: ele chama **de verdade** cada deployment, uma vez por minuto, para sempre, independentemente de tráfego. Para modelo local isso custa eletricidade. Para modelo cobrado por uso, é **1.440 compras por dia, por deployment**.
+
+Já aconteceu: dois modelos de imagem no gateway queimaram **US$ 36 em 43 horas**, com três chamadas legítimas no período. O relato completo está em [INC-0001](../incidentes/0001-sonda-de-saude-gerando-imagem.md).
+
+| Tipo | Custo da sonda | Pode entrar? |
+|---|---|---|
+| Ollama local | eletricidade | sim |
+| Chat pago (Anthropic, OpenAI) | alguns tokens · centavos/mês | sim |
+| **Geração de mídia** (imagem, áudio, vídeo) | **uma geração inteira por minuto** | **não** — chame o provider direto |
+
+`tests/unit/test_gateway_sem_modelo_cobrado_por_uso.py` recusa a mudança se você tentar. Se ele falhar, a saída não é editar o teste — é tirar o modelo do gateway, ou desligar a sonda.
+
+---
+
+## As quatro armadilhas que já nos pegaram
+
+### 1. A sonda de saúde gera de verdade
+
+Coberta na seção acima, e repetida aqui porque é a mais cara: `mode: image_generation` faz a sonda **produzir uma imagem cobrada** a cada 60 s. Ver [INC-0001](../incidentes/0001-sonda-de-saude-gerando-imagem.md).
+
+### 2. Modelos que "pensam" devolvem resposta vazia
 
 `qwen3` e similares emitem um bloco `<think>` antes de responder. Com `max_tokens` baixo, a cota inteira vai para o raciocínio e a caption chega vazia — sem erro nenhum.
 
 Solução: `think: false` no `litellm_params`. Para tarefas de raciocínio (`olimpo-reason`) o thinking é bem-vindo; para caption e classificação, é desperdício.
 
-### 2. Um deployment quebrado contamina o alias inteiro
+### 3. Um deployment quebrado contamina o alias inteiro
 
 Se um dos deployments do pool aponta para uma URL que responde mas **não tem aquele modelo**, o balanceador vai escolhê-lo na proporção do peso e falhar — ou pior, devolver lixo. O sintoma é intermitente, o que torna o diagnóstico difícil.
 
@@ -122,7 +144,7 @@ Foi exatamente o que aconteceu quando `MAC_MINI_1_URL` ainda apontava para o pla
 
 **Regra:** enquanto uma máquina não estiver de pé com o modelo baixado, **comente o deployment dela**. Um pool com três entradas onde duas não existem é pior que um pool com uma.
 
-### 3. Texto corrompido é problema do modelo, não do gateway
+### 4. Texto corrompido é problema do modelo, não do gateway
 
 Saída tipo `"olá c cor r daal e, a durra"` é sinal de peso/quantização ruim ou de KV cache quantizado agressivamente. Isole antes de culpar o LiteLLM:
 

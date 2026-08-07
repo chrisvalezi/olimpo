@@ -49,6 +49,7 @@ Como manter isso vivo sem quebrar uma conta.
 | [11-observabilidade.md](11-observabilidade.md) | `events` e `trace_id`, métricas do sistema e de negócio, dashboards do Grafana, alertas e como responder "por que a conta X postou isso?" |
 | [12-seguranca.md](12-seguranca.md) | Segredos, tokens de serviço, HMAC do webhook do orchestrator, superfície de exposição do painel, isolamento por cliente e retenção de dados |
 | [runbooks/](runbooks/) | Procedimentos de plantão: conta banida, orchestrator fora do ar, fila entupida, monitor em erro, estouro de orçamento de LLM, restaurar backup |
+| [incidentes/](incidentes/) | O que já deu errado contra recurso real, por que passou despercebido e **qual teste agora impede**. Runbook diz o que fazer quando acontecer; incidente diz por que aconteceu |
 
 ## Integrações
 

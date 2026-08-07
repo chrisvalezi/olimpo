@@ -20,6 +20,12 @@ Chamar o Ollama direto de dentro do código resolveria a Fase 0 em vinte minutos
 
 **Todo o tráfego de LLM do Olimpo passa por uma instância de LiteLLM (`LLM_GATEWAY_URL=http://litellm:4000`). Nenhum módulo fala com Ollama, Anthropic ou OpenAI diretamente. O código pede um `purpose`, não um modelo.**
 
+> ⚠️ **Exceção adquirida em 07/08/2026 — geração de mídia não passa pelo gateway.**
+>
+> Não é ressalva de escopo, é lição paga: a sonda de saúde do LiteLLM chama cada deployment de verdade a cada 60 s, e num deployment de imagem essa chamada **gera uma imagem cobrada**. Custou US$ 36 em 43 horas, com três chamadas legítimas no período — ver [INC-0001](../incidentes/0001-sonda-de-saude-gerando-imagem.md).
+>
+> Imagem, vídeo e voz vão pelos clientes diretos em `olimpo/media/providers/`. O gateway continua sendo o caminho único de **texto**, que é onde o balanceamento entre os Mac minis e o teto de gasto realmente valem.
+
 Detalhamento:
 
 - **Interface OpenAI-compatível única.** O core usa um cliente só, apontado para o gateway. Trocar `llama3.1:8b` por `qwen2.5:14b`, ou mandar uma rota para a Anthropic, é editar `ops/litellm.config.yaml` — arquivo de configuração, não código.
