@@ -42,3 +42,6 @@ storage/
 .vscode/
 *.swp
 docker-compose.override.yml
+
+# mídia bruta importada — fica no disco, nunca no git
+/import/
